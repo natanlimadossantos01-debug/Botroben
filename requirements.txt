@@ -1,5 +1,5 @@
 telethon
-iqoptionapi
 cryptg
 numpy
 requests
+git+https://github.com/iqoptionapi/iqoptionapi.git@master
