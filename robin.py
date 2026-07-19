@@ -3,11 +3,27 @@
 """
 ╔══════════════════════════════════════════════════════════════╗
 ║          🤖  R O B I N  B O T  v6.0                        ║
-║  Railway Ready · Hardcoded · Subprocesso por usuário        ║
+╠══════════════════════════════════════════════════════════════╣
+║  FIX CRÍTICO v6.0:                                          ║
+║  • Cada usuário tem seu PRÓPRIO subprocesso Python para IQ  ║
+║    → iqoptionapi não compartilha mais estado global         ║
+║  • Comunicação via multiprocessing.Queue (bidirecional)     ║
+║  • IQProcess: wrapper async transparente p/ o subprocesso   ║
+║  • Watchdog reconecta processo morto automaticamente        ║
+║  • Credenciais: env var → arquivo → input (só se TTY)       ║
+║    Railway/Docker não tem TTY → falha rápida c/ mensagem    ║
 ╚══════════════════════════════════════════════════════════════╝
 """
 
-import asyncio, json, logging, multiprocessing as mp, os, re, sys, time, traceback
+import asyncio
+import json
+import logging
+import multiprocessing as mp
+import os
+import re
+import sys
+import time
+import traceback
 from datetime import datetime, timedelta
 from enum import Enum, auto
 from pathlib import Path
@@ -16,24 +32,119 @@ from typing import Optional, Dict, Any
 from telethon import TelegramClient, events, Button
 
 # ══════════════════════════════════════════════
-# 🔑 SUAS CREDENCIAIS (JÁ CONFIGURADAS)
+# CONFIGURAÇÕES
 # ══════════════════════════════════════════════
-BOT_TOKEN   = "8233598336:AAHUtMg14-2hcOFObRhrBGsO4JIEyyA7gtI"
-TG_API_ID   = 22453120
-TG_API_HASH = "89826a4104518e9ed650cdb451ad8b53"
 
-MAX_USUARIOS  = 5
-TIMEOUT_ORDEM = 180
-WATCHDOG_INT  = 60
-SESSAO_LIMITE = 2
+MAX_USUARIOS  = 20
+TIMEOUT_ORDEM = 180      # segundos aguardando resultado
+WATCHDOG_INT  = 60       # intervalo do watchdog em segundos
+SESSAO_LIMITE = 2        # horas sem interação para remover sessão
+WORKER_TIMEOUT= 30       # timeout para resposta do worker (segundos)
 
 DIR_CONFIG = Path("dados/configs")
 DIR_STATS  = Path("dados/stats")
 DIR_CONFIG.mkdir(parents=True, exist_ok=True)
 DIR_STATS.mkdir(parents=True, exist_ok=True)
 
+_CRED_FILE = Path(".robin_creds.json")
+
 # ══════════════════════════════════════════════
-# LOGGER
+# CREDENCIAIS
+# ══════════════════════════════════════════════
+
+def _is_tty() -> bool:
+    """Retorna True somente se há terminal interativo (não Railway/Docker)."""
+    return sys.stdin.isatty()
+
+def _carregar_credenciais() -> tuple:
+    """
+    Prioridade: env var → .robin_creds.json → input interativo.
+    Se não há TTY (Railway, Docker, CI), falha imediatamente com
+    mensagem clara em vez de travar esperando input().
+    """
+    creds: dict = {}
+    if _CRED_FILE.exists():
+        try:
+            creds = json.loads(_CRED_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            creds = {}
+
+    def _salvar():
+        _CRED_FILE.write_text(
+            json.dumps(creds, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+    def _pedir(nome: str, dica: str) -> str:
+        """Pede valor interativamente ou aborta se não há TTY."""
+        if not _is_tty():
+            print(
+                f"\n❌ ERRO: '{nome}' não configurado e não há terminal interativo.\n"
+                f"   No Railway/Docker, configure a variável de ambiente:\n"
+                f"   {dica}\n"
+            )
+            sys.exit(1)
+        return input(f"   {nome}: ").strip()
+
+    # ── BOT TOKEN ────────────────────────────────────────────
+    token = os.getenv("ROBIN_BOT_TOKEN", "") or creds.get("bot_token", "")
+    if not token or ":" not in token:
+        if not _is_tty():
+            print(
+                "\n❌ ERRO: ROBIN_BOT_TOKEN não configurado.\n"
+                "   Configure a env var ROBIN_BOT_TOKEN no Railway.\n"
+            )
+            sys.exit(1)
+        print("\n🔑 BOT TOKEN não encontrado.")
+        print("   Cole o token do seu bot (ex: 123456789:ABC...):")
+        token = _pedir("Token", "ROBIN_BOT_TOKEN=123456789:ABC...")
+        if ":" not in token:
+            print("❌ Token inválido."); sys.exit(1)
+        creds["bot_token"] = token
+        _salvar()
+        print("✅ Token salvo!\n")
+
+    # ── TG_API_ID ────────────────────────────────────────────
+    api_id_str = os.getenv("TG_API_ID", "") or str(creds.get("api_id", ""))
+    if not api_id_str.isdigit():
+        if not _is_tty():
+            print(
+                "\n❌ ERRO: TG_API_ID não configurado.\n"
+                "   Obtenha em https://my.telegram.org → App Configuration\n"
+                "   Configure a env var TG_API_ID no Railway.\n"
+            )
+            sys.exit(1)
+        print("🔑 TG_API_ID não encontrado.")
+        print("   Acesse https://my.telegram.org → App Configuration → api_id")
+        api_id_str = _pedir("API ID (somente números)", "TG_API_ID=12345678")
+        if not api_id_str.isdigit():
+            print("❌ API ID inválido."); sys.exit(1)
+        creds["api_id"] = int(api_id_str)
+        _salvar()
+        print("✅ API ID salvo!\n")
+
+    # ── TG_API_HASH ──────────────────────────────────────────
+    api_hash = os.getenv("TG_API_HASH", "") or creds.get("api_hash", "")
+    if not api_hash or len(api_hash) < 10:
+        if not _is_tty():
+            print(
+                "\n❌ ERRO: TG_API_HASH não configurado.\n"
+                "   Obtenha em https://my.telegram.org → App Configuration\n"
+                "   Configure a env var TG_API_HASH no Railway.\n"
+            )
+            sys.exit(1)
+        print("🔑 TG_API_HASH não encontrado.")
+        print("   Acesse https://my.telegram.org → App Configuration → api_hash")
+        api_hash = _pedir("API Hash", "TG_API_HASH=abcdef1234...")
+        if len(api_hash) < 10:
+            print("❌ API Hash inválido."); sys.exit(1)
+        creds["api_hash"] = api_hash
+        _salvar()
+        print("✅ Credenciais salvas em .robin_creds.json\n")
+
+    return token, int(api_id_str), api_hash
+
+# ══════════════════════════════════════════════
+# LOGGER COLORIDO
 # ══════════════════════════════════════════════
 
 class _C:
@@ -48,7 +159,7 @@ class _Fmt(logging.Formatter):
         h   = datetime.now().strftime("%H:%M:%S")
         return f"{_C.GY}{h}{_C.R} {cor}{r.levelname:<8}{_C.R} {_C.GY}[{r.name}]{_C.R} {r.getMessage()}"
 
-def _mk_log(name="ROBIN"):
+def _mk_log(name="ROBIN") -> logging.Logger:
     lg = logging.getLogger(name)
     if lg.handlers: return lg
     lg.setLevel(logging.INFO)
@@ -63,10 +174,14 @@ def _mk_log(name="ROBIN"):
 log = _mk_log()
 
 # ══════════════════════════════════════════════
-# IQ WORKER (subprocesso)
+# IQ WORKER — roda em subprocesso isolado
 # ══════════════════════════════════════════════
 
 def _iq_worker_fn(uid: int, cmd_q: mp.Queue, res_q: mp.Queue):
+    """
+    Função que roda em subprocesso dedicado por usuário.
+    Recebe comandos via cmd_q, devolve resultados via res_q.
+    """
     api = None
     conta_atual = "PRACTICE"
 
@@ -77,7 +192,7 @@ def _iq_worker_fn(uid: int, cmd_q: mp.Queue, res_q: mp.Queue):
         try:
             cmd = cmd_q.get(timeout=300)
         except Exception:
-            break
+            break  # sem comando por 5min → encerra
 
         action = cmd.get("action", "")
 
@@ -100,17 +215,15 @@ def _iq_worker_fn(uid: int, cmd_q: mp.Queue, res_q: mp.Queue):
                     saldo = 0.0
                 _send({"ok": True, "saldo": saldo, "conta": conta})
             except ImportError:
-                _send({"ok": False, "erro": "❌ iqoptionapi não instalada."})
+                _send({"ok": False, "erro": "❌ iqoptionapi não instalada.\nRode: pip install iqoptionapi"})
             except Exception as e:
                 _send({"ok": False, "erro": f"❌ Erro: {e}"})
 
         elif action == "saldo":
             if not api:
-                _send({"ok": False, "saldo": 0.0})
-                continue
+                _send({"ok": False, "saldo": 0.0}); continue
             try:
-                saldo = float(api.get_balance())
-                _send({"ok": True, "saldo": saldo})
+                _send({"ok": True, "saldo": float(api.get_balance())})
             except Exception as e:
                 _send({"ok": False, "saldo": 0.0, "erro": str(e)})
 
@@ -124,8 +237,7 @@ def _iq_worker_fn(uid: int, cmd_q: mp.Queue, res_q: mp.Queue):
 
         elif action == "comprar":
             if not api:
-                _send({"ok": False, "erro": "Não conectado"})
-                continue
+                _send({"ok": False, "erro": "Não conectado"}); continue
             try:
                 ok, order_id = api.buy(
                     cmd["valor"], cmd["ativo"],
@@ -137,8 +249,7 @@ def _iq_worker_fn(uid: int, cmd_q: mp.Queue, res_q: mp.Queue):
 
         elif action == "verificar":
             if not api:
-                _send({"ok": False, "resultado": None})
-                continue
+                _send({"ok": False, "resultado": None}); continue
             order_id = cmd["order_id"]
             deadline = time.time() + cmd.get("timeout", TIMEOUT_ORDEM)
             resultado = None
@@ -146,8 +257,7 @@ def _iq_worker_fn(uid: int, cmd_q: mp.Queue, res_q: mp.Queue):
                 try:
                     r = api.check_win_v3(order_id)
                     if r is not None:
-                        resultado = float(r)
-                        break
+                        resultado = float(r); break
                 except Exception:
                     pass
                 time.sleep(0.5)
@@ -166,14 +276,14 @@ def _iq_worker_fn(uid: int, cmd_q: mp.Queue, res_q: mp.Queue):
                 _send({"ok": False, "erro": "Não conectado"})
 
         elif action == "stop":
-            _send({"ok": True})
-            break
+            _send({"ok": True}); break
 
         else:
             _send({"ok": False, "erro": f"Ação desconhecida: {action}"})
 
+
 # ══════════════════════════════════════════════
-# IQProcess
+# IQProcess — wrapper async do subprocesso
 # ══════════════════════════════════════════════
 
 class IQProcess:
@@ -190,9 +300,10 @@ class IQProcess:
     def _iniciar_processo(self):
         if self._proc and self._proc.is_alive():
             return
-        self._cmd_q = mp.Queue()
-        self._res_q = mp.Queue()
-        self._proc  = mp.Process(
+        ctx = mp.get_context("fork")   # fork é o padrão do Linux; seguro em containers
+        self._cmd_q = ctx.Queue()
+        self._res_q = ctx.Queue()
+        self._proc  = ctx.Process(
             target=_iq_worker_fn,
             args=(self.uid, self._cmd_q, self._res_q),
             daemon=True,
@@ -201,7 +312,7 @@ class IQProcess:
         self._proc.start()
         log.info(f"[IQProcess] Subprocesso iniciado uid={self.uid} pid={self._proc.pid}")
 
-    async def _cmd(self, cmd: dict, timeout: float = 30) -> dict:
+    async def _cmd(self, cmd: dict, timeout: float = WORKER_TIMEOUT) -> dict:
         async with self._lock:
             self._iniciar_processo()
             loop = asyncio.get_event_loop()
@@ -225,6 +336,7 @@ class IQProcess:
             self.ok    = True
             self.saldo = res.get("saldo", 0.0)
             self.conta = res.get("conta", conta)
+            log.info(f"IQ conectado uid={self.uid} conta={self.conta} saldo=${self.saldo:.2f}")
             return True, f"✅ Conectado! Saldo: ${self.saldo:,.2f}"
         self.ok = False
         return False, res.get("erro", "❌ Erro desconhecido")
@@ -276,9 +388,8 @@ class IQProcess:
             log.info(f"[IQProcess] Subprocesso encerrado uid={self.uid}")
 
 # ══════════════════════════════════════════════
-# FSM, CONFIG, STATS, MAPEADOR, PARSER, MOTOR
+# FSM
 # ══════════════════════════════════════════════
-# (mantenha exatamente como você já tem — copiado do seu script)
 
 class Est(Enum):
     IDLE=auto(); EMAIL=auto(); SENHA=auto(); VALOR=auto()
@@ -287,6 +398,10 @@ class Est(Enum):
     EDIT_EMAIL=auto(); EDIT_SENHA=auto(); EDIT_VALOR=auto()
     EDIT_GALES=auto(); EDIT_MULT=auto(); EDIT_ANT=auto()
     EDIT_SW=auto(); EDIT_SL=auto(); EDIT_CANAL=auto()
+
+# ══════════════════════════════════════════════
+# CONFIG (persistido por usuário)
+# ══════════════════════════════════════════════
 
 DEFAULTS_CFG = {
     "email": "", "senha": "",
@@ -328,6 +443,10 @@ class Config:
     @property
     def ok(self) -> bool: return bool(self._d.get("configurado"))
 
+# ══════════════════════════════════════════════
+# STATS (persistido por usuário)
+# ══════════════════════════════════════════════
+
 class Stats:
     def __init__(self, uid: int):
         self._f = DIR_STATS / f"{uid}.json"
@@ -367,6 +486,10 @@ class Stats:
     @property
     def dados(self) -> dict: self._reset_dia(); return dict(self._d)
 
+# ══════════════════════════════════════════════
+# SESSÃO DO USUÁRIO
+# ══════════════════════════════════════════════
+
 class UserSession:
     def __init__(self, uid: int):
         self.uid       = uid
@@ -380,7 +503,13 @@ class UserSession:
         self._sem      = asyncio.Semaphore(1)
 
     def touch(self): self.config.touch()
-    def encerrar(self): self.iq.encerrar()
+
+    def encerrar(self):
+        self.iq.encerrar()
+
+# ══════════════════════════════════════════════
+# MAPEADOR DE ATIVOS
+# ══════════════════════════════════════════════
 
 _ATIVOS = {
     "BTC":"BTC","ETH":"ETH","XRP":"XRP","BNB":"BNB","ADA":"ADA",
@@ -414,6 +543,10 @@ def mapear_ativo(ativo: str) -> tuple:
             if k in up or up in k: res = v; break
     if not res: res = up.replace("/", "")
     return res, ("OTC" if "-OTC" in res else "DIGITAL")
+
+# ══════════════════════════════════════════════
+# PARSER DE SINAIS
+# ══════════════════════════════════════════════
 
 _IGNORAR = re.compile(r"\b(WIN|LOSS|APURAÇÃO|RESULTADO)\b", re.I)
 
@@ -472,6 +605,10 @@ def parse_sinal(texto: str) -> Optional[dict]:
         "horario": _extrair_horario(txt),
     }
 
+# ══════════════════════════════════════════════
+# MOTOR DE OPERAÇÃO
+# ══════════════════════════════════════════════
+
 async def executar_operacao(session: UserSession, sinal: dict, send):
     async with session._sem:
         cfg   = session.config
@@ -505,6 +642,7 @@ async def executar_operacao(session: UserSession, sinal: dict, send):
         session.operando = True
 
         try:
+            # ── Aguarda momento de entrada ──────────────────────
             if sinc_vela:
                 alvo = await _calcular_entrada(sinal, antecipacao)
                 if alvo:
@@ -519,6 +657,7 @@ async def executar_operacao(session: UserSession, sinal: dict, send):
                     elif espera > 120:
                         await send("⚠️ Sinal distante — entrada imediata.")
 
+            # ── Loop entrada + gales ────────────────────────────
             for tentativa in range(max_gales + 1):
                 valor = (valor_base if tentativa == 0
                          else round(valor_base * (multiplicador ** tentativa), 2))
@@ -577,6 +716,7 @@ async def executar_operacao(session: UserSession, sinal: dict, send):
                 else:
                     perda_acum += abs(delta)
                     if tentativa < max_gales:
+                        # Aguarda 1s para garantir entrada no início da próxima vela
                         await asyncio.sleep(1.0)
                         continue
                     stats.registrar(False, -perda_acum)
@@ -596,6 +736,11 @@ async def executar_operacao(session: UserSession, sinal: dict, send):
             session.operando = False
 
 async def _calcular_entrada(sinal: dict, ant: float) -> Optional[datetime]:
+    """
+    Horário do sinal = abertura da vela.
+    Entrada = abertura - antecipação.
+    Ex: sinal 11:52 M1 ant=2s → entrada 11:51:58
+    """
     try:
         horario = sinal.get("horario")
         if horario:
@@ -632,7 +777,7 @@ def _fmt_resultado(win, tipo, ativo, direcao, tempo, valor, lucro, dia, saldo, c
     )
 
 # ══════════════════════════════════════════════
-# BOT PRINCIPAL (com todos os handlers)
+# BOT PRINCIPAL
 # ══════════════════════════════════════════════
 
 class RobinBot:
@@ -640,6 +785,9 @@ class RobinBot:
         self.sessions: Dict[int, UserSession] = {}
         self.client:   Optional[TelegramClient] = None
         self.admin_id: Optional[int]            = None
+        self._token   = ""
+        self._api_id  = 0
+        self._api_hash= ""
 
     async def _get(self, uid: int) -> Optional[UserSession]:
         if uid not in self.sessions:
@@ -847,8 +995,6 @@ class RobinBot:
             "/ajuda — Esta mensagem"
         )
 
-    # ── Admin ─────────────────────────────────────────────────
-
     async def _h_admin(self, event):
         uid = event.sender_id
         if self.admin_id is None:
@@ -919,8 +1065,6 @@ class RobinBot:
         except ValueError:
             await event.reply("❌ UID inválido.")
 
-    # ── FSM de texto ─────────────────────────────────────────
-
     async def _h_text(self, event):
         if not event.is_private or event.message.out: return
         uid = event.sender_id; s = await self._get(uid)
@@ -935,61 +1079,52 @@ class RobinBot:
         if est == Est.EMAIL:
             s.tmp["email"] = txt; s.estado = Est.SENHA
             await _ok("📌 *PASSO 2/8* — Digite sua **senha** da IQ Option:")
-
         elif est == Est.SENHA:
             s.tmp["senha"] = txt; s.estado = Est.VALOR
             try: await event.delete()
             except: pass
             await _ok("📌 *PASSO 3/8* — **Valor de entrada** ($):\n_Ex: 2.00_")
-
         elif est == Est.VALOR:
             try:
                 v = float(txt.replace(",",".")); assert v >= 0.5
                 s.tmp["valor_entrada"] = v; s.estado = Est.GALES
                 await _ok("📌 *PASSO 4/8* — Quantos **gales**? (0 a 5):")
             except: await _inval("❌ Valor inválido. Ex: `2.00`")
-
         elif est == Est.GALES:
             try:
                 g = int(txt); assert 0 <= g <= 5
                 s.tmp["gales"] = g; s.estado = Est.MULTIPLICADOR
                 await _ok("📌 *PASSO 5/8* — **Multiplicador** do gale:\n_Ex: 2.0_")
             except: await _inval("❌ Digite número de 0 a 5.")
-
         elif est == Est.MULTIPLICADOR:
             try:
                 m = float(txt.replace(",",".")); assert 1.1 <= m <= 5.0
                 s.tmp["multiplicador"] = m; s.estado = Est.ANTECIPACAO
                 await _ok("📌 *PASSO 6/8* — **Antecipação** (segundos):\n_Ex: 2.0_")
             except: await _inval("❌ Entre 1.1 e 5.0.")
-
         elif est == Est.ANTECIPACAO:
             try:
                 a = float(txt.replace(",",".")); assert 0 <= a <= 60
                 s.tmp["antecipacao"] = a; s.estado = Est.STOP_WIN
                 await _ok("📌 *PASSO 7/8* — **Stop Win** ($):\n_Ex: 100.00_")
             except: await _inval("❌ Entre 0 e 60 segundos.")
-
         elif est == Est.STOP_WIN:
             try:
                 sw = float(txt.replace(",",".")); assert sw >= 5
                 s.tmp["stop_win"] = sw; s.estado = Est.STOP_LOSS
                 await _ok("📌 *PASSO 8/8* — **Stop Loss** ($):\n_Ex: 50.00_")
             except: await _inval("❌ Mínimo $5.00.")
-
         elif est == Est.STOP_LOSS:
             try:
                 sl = float(txt.replace(",",".")); assert sl >= 5
                 s.tmp["stop_loss"] = sl; s.estado = Est.IDLE
                 await event.reply("🏦 *Tipo de conta IQ Option:*", buttons=self._bts_conta())
             except: await _inval("❌ Mínimo $5.00.")
-
         elif est == Est.CANAL:
             try:
                 cid = int(txt); s.config.set("canal_id", cid); s.estado = Est.IDLE
                 await _ok(f"✅ Canal: `{cid}`\n\nUse /ligar para ativar o robô! 🚀")
             except: await _inval("❌ ID inválido. Ex: `-1001234567890`")
-
         elif est == Est.EDIT_EMAIL:
             s.config.set("email", txt); s.estado = Est.IDLE
             await _ok(f"✅ Email: `{txt}`")
@@ -1040,8 +1175,6 @@ class RobinBot:
                 await _ok(f"✅ Canal: `{cid}`")
             except: await _inval("❌ ID inválido.")
 
-    # ── Callbacks inline ─────────────────────────────────────
-
     async def _h_callback(self, event):
         uid = event.sender_id; s = await self._get(uid)
         if not s: return
@@ -1063,25 +1196,20 @@ class RobinBot:
                 await event.edit("⚠️ Conecte à IQ Option primeiro.", buttons=self._bts_voltar()); return
             s.modo_auto = True; s.config.set("modo_auto", True)
             await event.edit("▶️ *Bot ligado!*", buttons=self._bts_voltar())
-
         elif data == "parar":
             s.modo_auto = False; s.config.set("modo_auto", False)
             await event.edit("⏹️ *Bot parado.*", buttons=self._bts_voltar())
-
         elif data == "resetstats":
             s.stats.resetar()
             await event.edit("✅ Estatísticas zeradas.", buttons=self._bts_voltar())
-
         elif data == "cancelar":
             s.estado = Est.IDLE; s.tmp = {}
             await event.edit("❌ Cancelado.", buttons=self._bts_voltar())
-
         elif data == "ajuda":
             await event.edit(
                 "📚 /start /menu /config /conectar /ligar /parar /status /ping /resetstats",
                 buttons=self._bts_voltar()
             )
-
         elif data == "ping":
             await event.edit("📶 Testando IQ Option...")
             ok, saldo = await s.iq.ping()
@@ -1094,7 +1222,6 @@ class RobinBot:
                 )
             else:
                 await event.edit("🔴 IQ offline. Use Conectar IQ.", buttons=self._bts_voltar())
-
         elif data == "conectar":
             await event.edit("🔄 Conectando à IQ Option...")
             email = s.config.get("email"); senha = s.config.get("senha")
@@ -1104,11 +1231,9 @@ class RobinBot:
             ok, msg = await s.iq.conectar(email, senha, conta)
             await self._send(uid, msg)
             await event.edit(self._resumo_status(s), buttons=self._bts_voltar())
-
         elif data in ("conta_practice", "conta_real"):
             s.tmp["tipo_conta"] = "PRACTICE" if "practice" in data else "REAL"
             await event.edit("🕯️ Sincronizar com o *horário exato do sinal?*", buttons=self._bts_sinc())
-
         elif data in ("sinc_sim", "sinc_nao"):
             s.tmp["sincronizar_vela"] = (data == "sinc_sim")
             s.config.set_many({
@@ -1132,7 +1257,6 @@ class RobinBot:
                 "💡 Dica: encaminhe uma mensagem do canal para @userinfobot para descobrir o ID."
             )
             asyncio.create_task(self._conectar(uid, s))
-
         elif data == "e_email":  s.estado = Est.EDIT_EMAIL; await event.edit("📧 Novo email:")
         elif data == "e_senha":  s.estado = Est.EDIT_SENHA; await event.edit("🔐 Nova senha:")
         elif data == "e_valor":  s.estado = Est.EDIT_VALOR; await event.edit("💵 Novo valor ($):")
@@ -1144,7 +1268,6 @@ class RobinBot:
         elif data == "e_canal":  s.estado = Est.EDIT_CANAL; await event.edit("📡 ID do canal:")
         elif data == "e_conta":
             await event.edit("🏦 Tipo de conta:", buttons=self._bts_conta())
-
         elif data in ("conta_practice_e", "conta_real_e"):
             tipo  = "PRACTICE" if "practice" in data else "REAL"
             label = "Treinamento" if tipo == "PRACTICE" else "Real"
@@ -1171,29 +1294,24 @@ class RobinBot:
         texto    = (event.message.raw_text or "").strip()
         if not texto: return
 
-        log.info(f"[SINAL] Mensagem recebida canal={canal_id} | texto={texto[:60]!r}")
+        log.info(f"[SINAL] canal={canal_id} | texto={texto[:60]!r}")
 
         sinal = parse_sinal(texto)
         if not sinal:
-            log.info(f"[SINAL] Ignorado (não é sinal válido) canal={canal_id}")
             return
 
-        log.info(f"[SINAL] ✅ Sinal parseado: {sinal['ativo']} {sinal['direcao']} M{sinal['tempo']} horario={sinal.get('horario')}")
+        log.info(f"[SINAL] ✅ {sinal['ativo']} {sinal['direcao']} M{sinal['tempo']} horario={sinal.get('horario')}")
 
         disparado = 0
         for uid, s in list(self.sessions.items()):
             cfg_canal = s.config.get("canal_id")
-            match = self._ids_equivalentes(cfg_canal, canal_id)
-            log.info(
-                f"[SINAL] uid={uid} | canal_cfg={cfg_canal} | canal_evento={canal_id} "
-                f"| match={match} | modo_auto={s.modo_auto} | iq_ok={s.iq.ok} | operando={s.operando}"
-            )
+            match     = self._ids_equivalentes(cfg_canal, canal_id)
             if match and s.modo_auto and not s.operando and s.iq.ok:
                 asyncio.create_task(executar_operacao(s, sinal, self._sender(uid)))
                 disparado += 1
 
         if disparado == 0:
-            log.warning(f"[SINAL] Sinal recebido mas nenhum usuário elegível (canal={canal_id})")
+            log.warning(f"[SINAL] Nenhum usuário elegível (canal={canal_id})")
 
     # ── Watchdog ─────────────────────────────────────────────
 
@@ -1222,46 +1340,84 @@ class RobinBot:
                     if not proc_vivo and s.iq.ok:
                         log.warning(f"Subprocesso IQ morreu uid={uid}, reconectando...")
                         s.iq.ok = False
-                        asyncio.create_task(
-                            s.iq.conectar(
-                                s.config.get("email",""),
-                                s.config.get("senha",""),
-                                s.config.get("tipo_conta","PRACTICE"),
-                            )
-                        )
+                        asyncio.create_task(s.iq.conectar(
+                            s.config.get("email",""),
+                            s.config.get("senha",""),
+                            s.config.get("tipo_conta","PRACTICE"),
+                        ))
                     elif proc_vivo and s.iq.ok:
                         ok, _ = await s.iq.ping()
                         if not ok:
                             log.warning(f"IQ desconectada uid={uid}, reconectando...")
                             s.iq.ok = False
-                            asyncio.create_task(
-                                s.iq.conectar(
-                                    s.config.get("email",""),
-                                    s.config.get("senha",""),
-                                    s.config.get("tipo_conta","PRACTICE"),
-                                )
-                            )
+                            asyncio.create_task(s.iq.conectar(
+                                s.config.get("email",""),
+                                s.config.get("senha",""),
+                                s.config.get("tipo_conta","PRACTICE"),
+                            ))
 
-    # ── RUN (SEM INPUT) ──────────────────────────────────────
+    # ── Restaurar sessões ao reiniciar ───────────────────────
+
+    async def _restaurar_sessoes(self):
+        restaurados = 0
+        for cfg_file in sorted(DIR_CONFIG.glob("*.json")):
+            try:
+                uid = int(cfg_file.stem)
+                d   = json.loads(cfg_file.read_text(encoding="utf-8"))
+                if not d.get("configurado"): continue
+
+                s = UserSession(uid)
+                self.sessions[uid] = s
+
+                email = d.get("email",""); senha = d.get("senha","")
+                conta = d.get("tipo_conta","PRACTICE")
+
+                if email and senha:
+                    log.info(f"Restaurando uid={uid} ({email})...")
+                    ok, _ = await s.iq.conectar(email, senha, conta)
+                    if ok and d.get("modo_auto"):
+                        s.modo_auto = True
+                        await self._send(uid,
+                            "🔄 *ROBIN BOT reiniciado!*\n\n"
+                            "✅ Reconectado à IQ Option.\n"
+                            "▶️ Modo automático reativado."
+                        )
+                    elif not ok:
+                        await self._send(uid,
+                            "⚠️ *ROBIN BOT reiniciado!*\n\n"
+                            "❌ Falha ao reconectar à IQ Option.\n"
+                            "Use /conectar para tentar novamente."
+                        )
+                    restaurados += 1
+
+                if len(self.sessions) >= MAX_USUARIOS:
+                    break
+            except Exception as e:
+                log.warning(f"Erro ao restaurar {cfg_file}: {e}")
+
+        log.info(f"✅ {restaurados} sessão(ões) restaurada(s)")
+
+    # ── Run ──────────────────────────────────────────────────
 
     async def run(self):
-        session_file = "robin_v6_session.session"
-        if Path(session_file).exists():
-            Path(session_file).unlink()
-            log.info("Sessão antiga removida.")
+        self._token, self._api_id, self._api_hash = _carregar_credenciais()
 
-        print(f"""\
+        print("""\
 \033[95m\033[1m╔══════════════════════════════════════════════╗
 ║       🤖  R O B I N  B O T  v6.0           ║
-║  Hardcoded · {MAX_USUARIOS} usuários · Subprocesso        ║
+║  20 usuários · processo isolado por conta    ║
 ╚══════════════════════════════════════════════╝\033[0m
 """)
 
         while True:
             try:
-                self.client = TelegramClient(session_file, TG_API_ID, TG_API_HASH)
-                await self.client.start(bot_token=BOT_TOKEN)
+                self.client = TelegramClient(
+                    "robin_v6_session", self._api_id, self._api_hash
+                )
+                await self.client.start(bot_token=self._token)
                 log.info("✅ Bot conectado ao Telegram")
+
+                await self._restaurar_sessoes()
 
                 c     = self.client
                 _priv = lambda e: e.is_private
@@ -1288,7 +1444,7 @@ class RobinBot:
                 c.add_event_handler(self._h_sinal,        events.NewMessage(func=_npriv))
 
                 asyncio.create_task(self._watchdog())
-                log.info(f"🚀 Pronto! {MAX_USUARIOS} usuários | subprocesso por conta")
+                log.info(f"🚀 Pronto! {MAX_USUARIOS} usuários | subprocesso por conta | watchdog {WATCHDOG_INT}s")
 
                 await self.client.run_until_disconnected()
 
@@ -1305,10 +1461,12 @@ class RobinBot:
                 log.critical(f"Erro fatal: {e}\n{traceback.format_exc()}")
                 await asyncio.sleep(10)
 
+
 # ══════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════
 
 if __name__ == "__main__":
-    mp.set_start_method("spawn", force=True)
+    # Linux (Railway/Termux) usa fork por padrão — não chama set_start_method
+    # para não quebrar ambientes que já inicializaram o multiprocessing.
     asyncio.run(RobinBot().run())
