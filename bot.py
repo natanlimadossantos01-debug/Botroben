@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-⚛️ QUANTUM IQ BOT — Multi-usuário (arquivo único)
-Configure as variáveis na seção CONFIG abaixo antes de rodar.
+⚛️ QUANTUM IQ BOT — Multi-usuário (Railway Ready)
 """
 
 # ════════════════════════════════════════════
 #  ⚙️  CONFIG — preencha aqui
 # ════════════════════════════════════════════
-BOT_TOKEN      = "8233598336:AAHUtMg14-2hcOFObRhrBGsO4JIEyyA7gtI"   # Token do @BotFather
-ADMIN_ID       = 6058265294    # Seu ID numérico do Telegram (@userinfobot)
-TG_API_ID      = 22453120    # my.telegram.org → App api_id
-TG_API_HASH    = "89826a4104518e9ed650cdb451ad8b53"   # my.telegram.org → App api_hash
-TG_SESSION_STR = "1AZWarzQBu6K7sCuqn6BbtMWuH1g3aYs3PYT2Csv4uuXASN1k3L4dTY4VV3gx3Qn6Jb2hNQM8VZDp2jdjk0u3ci4tGrGEl8hVl_Z8BWp1NwFK1rU2rb4QTQnAQk3qIpg931QyiqW1m-PLpuCa6WJcrKGSNvtO6g7T_7nG1EzIRLyXHVl-46c1NDK_JqKzB2ym7kZcjScMRL2KkUgXoBbTjwv2dASbEHnSHNGM_thmun6WUQlMDnMmD5VFsDIR-GiP1FcFidKdFpm0cJvJqdt31l7jJWqCgd_E1efAm5mZVYak_wEYffHYYUtwPlgD0webWFn2tiH7bFX4D6BoUqy_S7ubdiPuIdw="   # Gerado pelo gerar_sessao.py (deixe "" para usar arquivo local)
+BOT_TOKEN      = "8233598336:AAHUtMg14-2hcOFObRhrBGsO4JIEyyA7gtI"
+ADMIN_ID       = 6058265294
+TG_API_ID      = 22453120
+TG_API_HASH    = "89826a4104518e9ed650cdb451ad8b53"
+TG_SESSION_STR = "1AZWarzQBu6K7sCuqn6BbtMWuH1g3aYs3PYT2Csv4uuXASN1k3L4dTY4VV3gx3Qn6Jb2hNQM8VZDp2jdjk0u3ci4tGrGEl8hVl_Z8BWp1NwFK1rU2rb4QTQnAQk3qIpg931QyiqW1m-PLpuCa6WJcrKGSNvtO6g7T_7nG1EzIRLyXHVl-46c1NDK_JqKzB2ym7kZcjScMRL2KkUgXoBbTjwv2dASbEHnSHNGM_thmun6WUQlMDnMmD5VFsDIR-GiP1FcFidKdFpm0cJvJqdt31l7jJWqCgd_E1efAm5mZVYak_wEYffHYYUtwPlgD0webWFn2tiH7bFX4D6BoUqy_S7ubdiPuIdw="
 CANAL_LINK     = "https://t.me/+_6C6EMQUg1syODdh"
 DB_PATH        = "quantum.db"
 SESSION        = "quantum_server"
@@ -30,6 +29,7 @@ from telegram.ext import (
     MessageHandler, ConversationHandler, filters, ContextTypes
 )
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.tl.functions.messages import ImportChatInviteRequest
 from telethon.tl.types import Channel, Chat
 
@@ -601,88 +601,86 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ════════════════════════════════════════════
 
 async def executar_para_usuario(uid, sinal, app):
-    user = get_user(uid)
-    if not user or not user["bot_ligado"]:
-        return
+    try:
+        user = get_user(uid)
+        if not user or not user["bot_ligado"]:
+            return
 
-    res = resultado_hoje(uid)
-    if user["stop_loss"] > 0 and res["lucro"] <= -user["stop_loss"]:
+        res = resultado_hoje(uid)
+        if user["stop_loss"] > 0 and res["lucro"] <= -user["stop_loss"]:
+            await app.bot.send_message(uid,
+                f"🛑 *Stop Loss atingido!*\nLucro no dia: R$ {res['lucro']:.2f}", parse_mode="Markdown")
+            atualizar_config(uid, bot_ligado=0); return
+        if user["stop_win"] > 0 and res["lucro"] >= user["stop_win"]:
+            await app.bot.send_message(uid,
+                f"🏆 *Stop Win atingido!*\nLucro no dia: R$ {res['lucro']:.2f}", parse_mode="Markdown")
+            atualizar_config(uid, bot_ligado=0); return
+
         await app.bot.send_message(uid,
-            f"🛑 *Stop Loss atingido!*\nLucro no dia: R$ {res['lucro']:.2f}", parse_mode="Markdown")
-        atualizar_config(uid, bot_ligado=0); return
-    if user["stop_win"] > 0 and res["lucro"] >= user["stop_win"]:
-        await app.bot.send_message(uid,
-            f"🏆 *Stop Win atingido!*\nLucro no dia: R$ {res['lucro']:.2f}", parse_mode="Markdown")
-        atualizar_config(uid, bot_ligado=0); return
+            f"🚀 *Iniciando operação...*\n"
+            f"💹 Entrando em `{sinal.get('ativo')}` {sinal.get('direcao','').upper()} M{sinal.get('expiracao')}",
+            parse_mode="Markdown"
+        )
 
-    await app.bot.send_message(uid,
-        f"⚛️ *SINAL DETECTADO*\n{'─'*25}\n"
-        f"💰 Ativo    : `{sinal.get('ativo')}`\n"
-        f"📈 Direção  : *{sinal.get('direcao','').upper()}*\n"
-        f"⌛ Expiração: M{sinal.get('expiracao')}\n"
-        f"📊 Confiança: {sinal.get('confianca','?')}%\n"
-        f"🛡️ Score IA : {sinal.get('score','?')}/100\n"
-        f"🚀 Operando...", parse_mode="Markdown"
-    )
+        op = operadores_ativos.get(uid)
+        if not op:
+            op = IQOperador(user)
+            ok, info = op.conectar()
+            if not ok:
+                await app.bot.send_message(uid, f"❌ Erro IQ Option: {info}"); return
+            operadores_ativos[uid] = op
 
-    op = operadores_ativos.get(uid)
-    if not op:
-        op = IQOperador(user)
-        ok, info = op.conectar()
-        if not ok:
-            await app.bot.send_message(uid, f"❌ Erro IQ Option: {info}"); return
-        operadores_ativos[uid] = op
+        loop = asyncio.get_event_loop()
+        resultados = await loop.run_in_executor(None, op.operar, sinal)
 
-    loop = asyncio.get_event_loop()
-    resultados = await loop.run_in_executor(None, op.operar, sinal)
+        msg = f"📊 *RESULTADO*\n{'─'*25}\n"
+        for r in resultados:
+            if "erro" in r:
+                msg += f"❌ Erro: {r['erro']}\n"
+            elif r["status"] == "win":
+                g = f" (Gale {r['gale']})" if r["gale"] > 0 else ""
+                msg += f"✅ *WIN{g}* +R$ {r['lucro']:.2f}\n"
+            elif r["status"] == "loss":
+                g = f" (Gale {r['gale']})" if r["gale"] > 0 else ""
+                msg += f"❌ *LOSS{g}* -R$ {r['valor']:.2f}\n"
+            elif r["status"] == "equal":
+                msg += "〰️ *Empate*\n"
 
-    msg = f"📊 *RESULTADO*\n{'─'*25}\n"
-    for r in resultados:
-        if "erro" in r:
-            msg += f"❌ Erro: {r['erro']}\n"
-        elif r["status"] == "win":
-            g = f" (Gale {r['gale']})" if r["gale"] > 0 else ""
-            msg += f"✅ *WIN{g}* +R$ {r['lucro']:.2f}\n"
-        elif r["status"] == "loss":
-            g = f" (Gale {r['gale']})" if r["gale"] > 0 else ""
-            msg += f"❌ *LOSS{g}* -R$ {r['valor']:.2f}\n"
-        elif r["status"] == "equal":
-            msg += "〰️ *Empate*\n"
+        res_hoje = resultado_hoje(uid)
+        msg += f"{'─'*25}\n💰 Lucro no dia: R$ {res_hoje['lucro']:.2f}"
+        await app.bot.send_message(uid, msg, parse_mode="Markdown")
 
-    res_hoje = resultado_hoje(uid)
-    msg += f"{'─'*25}\n💰 Lucro no dia: R$ {res_hoje['lucro']:.2f}"
-    await app.bot.send_message(uid, msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"❌ executar_para_usuario({uid}): {e}", exc_info=True)
 
 
 async def rodar_listener(app):
-    import os
-    from telethon.sessions import StringSession
-    # Usa string de sessão se disponível (Railway), senão arquivo local (Termux)
-    session_str = TG_SESSION_STR or os.environ.get("TG_SESSION_STRING", "")
-    session = StringSession(session_str) if session_str else SESSION
+    session = StringSession(TG_SESSION_STR) if TG_SESSION_STR else SESSION
+    
     async with TelegramClient(session, TG_API_ID, TG_API_HASH) as client:
         logger.info("✅ Telethon conectado!")
 
         entity = None
         invite = CANAL_LINK.strip("/").split("+")[-1]
+        
         try:
             result = await client(ImportChatInviteRequest(invite))
             entity = result.chats[0]
+            logger.info(f"✅ Entrou no canal via invite")
         except Exception as e:
             if "already" in str(e).lower():
+                logger.info("Já está no canal, procurando nos diálogos...")
                 async for d in client.iter_dialogs():
-                    t = getattr(d.entity, 'title', '') or ''
-                    if 'quantum' in t.lower() or 'ia' in t.lower():
-                        entity = d.entity; break
-                if not entity:
-                    async for d in client.iter_dialogs():
-                        if isinstance(d.entity, (Channel, Chat)):
-                            entity = d.entity; break
+                    if isinstance(d.entity, (Channel, Chat)):
+                        entity = d.entity
+                        break
             else:
-                logger.error(f"Canal: {e}"); return
+                logger.error(f"❌ Erro ao acessar canal: {e}")
+                return
 
         if not entity:
-            logger.error("Canal não encontrado!"); return
+            logger.error("❌ Canal não encontrado!")
+            return
 
         logger.info(f"👀 Escutando: {getattr(entity,'title','canal')}")
 
@@ -692,18 +690,26 @@ async def rodar_listener(app):
             sinal = parse_sinal(texto)
             if not sinal: return
 
-            logger.info(f"Sinal: {sinal.get('ativo')} {sinal.get('direcao','').upper()}")
-
-            if "horario" in sinal:
-                agora = datetime.now()
-                h, m  = map(int, sinal["horario"].split(":"))
-                alvo  = agora.replace(hour=h, minute=m, second=0, microsecond=0)
-                diff  = (alvo - agora).total_seconds()
-                if 0 < diff <= 90:
-                    await asyncio.sleep(diff - 0.5)
+            logger.info(f"📡 Sinal: {sinal.get('ativo')} {sinal.get('direcao','').upper()}")
 
             uids = usuarios_bot_ligado()
-            logger.info(f"Disparando para {len(uids)} usuário(s)...")
+            
+            for uid in uids:
+                try:
+                    direcao_emoji = "🟢 CALL" if sinal.get("direcao") == "call" else "🔴 PUT"
+                    await app.bot.send_message(uid,
+                        f"📡 *SINAL RECEBIDO*\n{'─'*25}\n"
+                        f"💰 Ativo     : `{sinal.get('ativo')}`\n"
+                        f"📈 Direção   : *{direcao_emoji}*\n"
+                        f"⌛ Expiração : M{sinal.get('expiracao')}\n"
+                        f"📊 Confiança : {sinal.get('confianca','?')}%\n"
+                        f"🛡️ Score IA  : {sinal.get('score','?')}/100",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.warning(f"Aviso para {uid}: {e}")
+
+            logger.info(f"🚀 Disparando para {len(uids)} usuário(s)...")
             for uid in uids:
                 asyncio.create_task(executar_para_usuario(uid, sinal, app))
 
@@ -717,14 +723,12 @@ async def post_init(app):
     asyncio.create_task(rodar_listener(app))
 
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
-    """Captura erros de rede e outros sem travar o bot."""
     err = ctx.error
-    # Erros de rede são normais (queda de internet) — só loga e segue
     from telegram.error import NetworkError, TimedOut
     if isinstance(err, (NetworkError, TimedOut)):
-        logger.warning(f"⚠️ Erro de rede (reconectando): {err}")
+        logger.warning(f"⚠️ Erro de rede: {err}")
         return
-    logger.error(f"❌ Erro inesperado: {err}", exc_info=err)
+    logger.error(f"❌ Erro: {err}", exc_info=err)
 
 def main():
     if not BOT_TOKEN:
@@ -770,7 +774,11 @@ def main():
     app.add_error_handler(error_handler)
 
     logger.info("🚀 Bot iniciado!")
-    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+        bootstrap_retries=-1,
+    )
 
 if __name__ == "__main__":
     main()
