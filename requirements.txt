@@ -1,4 +1,5 @@
 python-telegram-bot[job-queue]
 telethon
 cryptg
-iqoptionapi
+numpy
+git+https://github.com/iqoptionapi/iqoptionapi.git@master
