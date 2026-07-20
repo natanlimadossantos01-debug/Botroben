@@ -20,9 +20,17 @@ SESSION        = "quantum_server"
 
 import asyncio
 import logging
+import os
 import re
 import sqlite3
+import time
 from datetime import datetime, timedelta
+
+# ════════════════════════════════════════════
+# 🇧🇷 HORÁRIO DE BRASÍLIA
+# ════════════════════════════════════════════
+os.environ['TZ'] = 'America/Sao_Paulo'
+time.tzset()
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -609,7 +617,7 @@ async def _enviar_com_retry(bot, uid, texto, tentativas=3, **kwargs):
             return
         except (NetworkError, TimedOut) as e:
             if i < tentativas - 1:
-                await asyncio.sleep(2 ** i)  # backoff: 1s, 2s, 4s
+                await asyncio.sleep(2 ** i)
             else:
                 logger.warning(f"⚠️ Falha ao enviar msg para {uid} após {tentativas} tentativas: {e}")
 
@@ -677,9 +685,7 @@ async def executar_para_usuario(uid, sinal, app):
 
 
 async def rodar_listener(app):
-    import os
     from telethon.sessions import StringSession
-    # Usa string de sessão se disponível (Railway), senão arquivo local (Termux)
     session_str = TG_SESSION_STR or os.environ.get("TG_SESSION_STRING", "")
     session = StringSession(session_str) if session_str else SESSION
     async with TelegramClient(session, TG_API_ID, TG_API_HASH) as client:
@@ -719,7 +725,6 @@ async def rodar_listener(app):
             uids = usuarios_bot_ligado()
             horario = sinal.get("horario", "")
 
-            # ── Notificação imediata de sinal recebido ──
             for uid in uids:
                 try:
                     direcao_emoji = "🟢 CALL" if sinal.get("direcao") == "call" else "🔴 PUT"
@@ -737,7 +742,6 @@ async def rodar_listener(app):
                 except Exception as e:
                     logger.warning(f"Aviso sinal para {uid}: {e}")
 
-            # ── Aguarda o horário de entrada ──
             if horario:
                 agora = datetime.now()
                 h, m  = map(int, horario.split(":"))
@@ -772,9 +776,7 @@ async def post_init(app):
     asyncio.create_task(rodar_listener(app))
 
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
-    """Captura erros de rede e outros sem travar o bot."""
     err = ctx.error
-    # Erros de rede são normais (queda de internet) — só loga e segue
     from telegram.error import NetworkError, TimedOut
     if isinstance(err, (NetworkError, TimedOut)):
         logger.warning(f"⚠️ Erro de rede (reconectando): {err}")
@@ -828,7 +830,7 @@ def main():
     app.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
-        bootstrap_retries=-1,   # tenta infinitamente até conectar
+        bootstrap_retries=-1,
     )
 
 if __name__ == "__main__":
