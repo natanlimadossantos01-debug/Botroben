@@ -8,11 +8,11 @@ Configure as variáveis na seção CONFIG abaixo antes de rodar.
 # ════════════════════════════════════════════
 #  ⚙️  CONFIG — preencha aqui
 # ════════════════════════════════════════════
-BOT_TOKEN      = ""   # Token do @BotFather
-ADMIN_ID       = 0    # Seu ID numérico do Telegram (@userinfobot)
-TG_API_ID      = 0    # my.telegram.org → App api_id
-TG_API_HASH    = ""   # my.telegram.org → App api_hash
-TG_SESSION_STR = ""   # Gerado pelo gerar_sessao.py (deixe "" para usar arquivo local)
+BOT_TOKEN      = "8233598336:AAHUtMg14-2hcOFObRhrBGsO4JIEyyA7gtI"   # Token do @BotFather
+ADMIN_ID       = 6058265294    # Seu ID numérico do Telegram (@userinfobot)
+TG_API_ID      = 22453120    # my.telegram.org → App api_id
+TG_API_HASH    = "89826a4104518e9ed650cdb451ad8b53"   # my.telegram.org → App api_hash
+TG_SESSION_STR = "1AZWarzQBu6K7sCuqn6BbtMWuH1g3aYs3PYT2Csv4uuXASN1k3L4dTY4VV3gx3Qn6Jb2hNQM8VZDp2jdjk0u3ci4tGrGEl8hVl_Z8BWp1NwFK1rU2rb4QTQnAQk3qIpg931QyiqW1m-PLpuCa6WJcrKGSNvtO6g7T_7nG1EzIRLyXHVl-46c1NDK_JqKzB2ym7kZcjScMRL2KkUgXoBbTjwv2dASbEHnSHNGM_thmun6WUQlMDnMmD5VFsDIR-GiP1FcFidKdFpm0cJvJqdt31l7jJWqCgd_E1efAm5mZVYak_wEYffHYYUtwPlgD0webWFn2tiH7bFX4D6BoUqy_S7ubdiPuIdw="   # Gerado pelo gerar_sessao.py (deixe "" para usar arquivo local)
 CANAL_LINK     = "https://t.me/+_6C6EMQUg1syODdh"
 DB_PATH        = "quantum.db"
 SESSION        = "quantum_server"
