@@ -231,414 +231,546 @@ class IQOperador:
         self.api.change_balance(self.user["iq_conta"])
         return True, self.api.get_balance()
 
-    def desconectar(self):                                                                              try:                                                                                                if self.api: self.api.close()                                                               except: pass
+    def desconectar(self):
+        try:
+            if self.api: self.api.close()
+        except: pass
 
     def checar_resultado(self, id_op):
-        try:                                                                                                res = self.api.check_win_v3(id_op)
+        try:
+            res = self.api.check_win_v3(id_op)
             if isinstance(res, tuple):
                 status, lucro = res
-                return str(status).lower(), float(lucro)                                                    lucro = float(res)
+                return str(status).lower(), float(lucro)
+            lucro = float(res)
             if lucro > 0:  return "win",   lucro
             if lucro < 0:  return "loss",  abs(lucro)
             return "equal", 0.0
-        except Exception as e:                                                                              logger.error(f"check_win: {e}")
-            return "erro", 0.0                                                                  
-    def operar(self, sinal):                                                                            user      = self.user
-        ativo     = sinal["ativo"]                                                                      direcao   = sinal["direcao"]
-        exp       = sinal.get("expiracao", 1)                                                           valor     = user["valor_entrada"]
-        max_gales = min(sinal.get("gales", 0), user["max_gales"])                                       resultados = []
-        tentativa  = 0                                                                          
-        while tentativa <= max_gales:                                                                       val = round(valor * (user["multiplicador"] ** tentativa), 2)
+        except Exception as e:
+            logger.error(f"check_win: {e}")
+            return "erro", 0.0
+
+    def operar(self, sinal):
+        user      = self.user
+        ativo     = sinal["ativo"]
+        direcao   = sinal["direcao"]
+        exp       = sinal.get("expiracao", 1)
+        valor     = user["valor_entrada"]
+        max_gales = min(sinal.get("gales", 0), user["max_gales"])
+        resultados = []
+        tentativa  = 0
+
+        while tentativa <= max_gales:
+            val = round(valor * (user["multiplicador"] ** tentativa), 2)
             try:
                 ok, id_op = self.api.buy(val, ativo, direcao, exp)
-                if not ok:                                                                                          resultados.append({"erro": "Ordem rejeitada"})
+                if not ok:
+                    resultados.append({"erro": "Ordem rejeitada"})
                     break
-                                                                                                                status, lucro = self.checar_resultado(id_op)
+
+                status, lucro = self.checar_resultado(id_op)
 
                 if status == "win":
-                    salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "win", lucro)                    resultados.append({"status":"win","valor":val,"lucro":lucro,"gale":tentativa})
-                    break                                                                                       elif status in ("loss","loose"):
+                    salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "win", lucro)
+                    resultados.append({"status":"win","valor":val,"lucro":lucro,"gale":tentativa})
+                    break
+                elif status in ("loss","loose"):
                     salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "loss", -val)
                     resultados.append({"status":"loss","valor":val,"gale":tentativa})
                     tentativa += 1
                 elif status == "equal":
                     salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "equal", 0)
                     resultados.append({"status":"equal","valor":val,"gale":tentativa})
-                    break                                                                                       else:
+                    break
+                else:
                     resultados.append({"status":status,"valor":val,"gale":tentativa})
                     break
-            except Exception as e:                                                                              resultados.append({"erro": str(e)})
+            except Exception as e:
+                resultados.append({"erro": str(e)})
                 break
-                                                                                                        return resultados
+
+        return resultados
 
 # ════════════════════════════════════════════
-#  🤖  BOT TELEGRAM — ESTADOS                                                                   # ════════════════════════════════════════════
+#  🤖  BOT TELEGRAM — ESTADOS
+# ════════════════════════════════════════════
 
 (CONF_EMAIL, CONF_SENHA, CONF_CONTA,
- CONF_VALOR, CONF_MULTI, CONF_GALES,                                                             CONF_SL, CONF_SW) = range(8)
+ CONF_VALOR, CONF_MULTI, CONF_GALES,
+ CONF_SL, CONF_SW) = range(8)
 
 operadores_ativos: dict = {}
 
 def is_admin(uid): return uid == ADMIN_ID
 
 def fmt_exp(exp_str):
-    try:                                                                                                diff = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S") - datetime.now()
+    try:
+        diff = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S") - datetime.now()
         d = diff.days
         if d < 0:  return "⛔ Expirado"
         if d == 0: return "⚠️ Expira hoje"
         return f"✅ {d} dias restantes"
     except: return "?"
-                                                                                                # ── /start ────────────────────────────────
+
+# ── /start ────────────────────────────────
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     nome = update.effective_user.first_name
     user = get_user(uid)
 
-    if not user:                                                                                        criar_usuario(uid, update.effective_user.username, nome)
+    if not user:
+        criar_usuario(uid, update.effective_user.username, nome)
         await update.message.reply_text(
             f"👋 Olá, *{nome}*! Bem-vindo ao *⚛️ Quantum IQ Bot*!\n\n"
             f"🎁 Você ganhou *3 dias grátis* para testar!\n\n"
             f"📋 *Próximos passos:*\n"
             f"1️⃣ /configurar — cadastre sua conta IQ Option\n"
-            f"2️⃣ /iniciar — ligue o bot\n"                                                                   f"3️⃣ /status — veja seus resultados\n\n"
+            f"2️⃣ /iniciar — ligue o bot\n"
+            f"3️⃣ /status — veja seus resultados\n\n"
             f"💬 Dúvidas? Fale com o suporte.",
             parse_mode="Markdown"
-        )                                                                                           else:
+        )
+    else:
         s = fmt_exp(user["expiracao"]) if user["ativo"] else "⛔ Inativo"
         await update.message.reply_text(
             f"👋 Olá novamente, *{nome}*!\n\n📊 Plano: {s}\n\nUse /status para ver seus resultados.",
             parse_mode="Markdown"
-        )                                                                                       
+        )
+
 # ── /status ───────────────────────────────
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     user = get_user(uid)
-    if not user:                                                                                        await update.message.reply_text("❌ Use /start primeiro.")
+    if not user:
+        await update.message.reply_text("❌ Use /start primeiro.")
         return
 
-    res  = resultado_hoje(uid)                                                                      taxa = (res["wins"] / res["total"] * 100) if res["total"] > 0 else 0
+    res  = resultado_hoje(uid)
+    taxa = (res["wins"] / res["total"] * 100) if res["total"] > 0 else 0
     exp  = fmt_exp(user["expiracao"]) if user["ativo"] else "⛔ Inativo"
     conf = "✅ Configurado" if user.get("iq_email") else "❌ Não configurado"
-                                                                                                    await update.message.reply_text(
+
+    await update.message.reply_text(
         f"⚛️ *QUANTUM IQ BOT — STATUS*\n{'─'*30}\n"
         f"👤 Plano    : {exp}\n"
         f"🤖 Bot      : {'🟢 Ligado' if user['bot_ligado'] else '🔴 Desligado'}\n"
         f"💹 IQ Option: {conf} ({user.get('iq_conta','PRACTICE')})\n"
         f"{'─'*30}\n"
-        f"📊 *Resultado de hoje:*\n"                                                                    f"🔢 Operações : {res['total']}\n"
+        f"📊 *Resultado de hoje:*\n"
+        f"🔢 Operações : {res['total']}\n"
         f"✅ Wins      : {res['wins']}\n"
         f"❌ Losses    : {res['losses']}\n"
         f"🎯 Assertiv. : {taxa:.0f}%\n"
         f"💰 Lucro     : R$ {res['lucro']:.2f}\n"
         f"{'─'*30}\n"
-        f"⚙️ Entrada: R$ {user['valor_entrada']} | Gale: {user['multiplicador']}x ({user['max_gales']} max)\n"                                                                                           f"🛑 Stop L: R$ {user['stop_loss']} | Stop W: R$ {user['stop_win']}",
+        f"⚙️ Entrada: R$ {user['valor_entrada']} | Gale: {user['multiplicador']}x ({user['max_gales']} max)\n"
+        f"🛑 Stop L: R$ {user['stop_loss']} | Stop W: R$ {user['stop_win']}",
         parse_mode="Markdown"
-    )                                                                                           
+    )
+
 # ── /iniciar ──────────────────────────────
 
 async def cmd_iniciar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     user = get_user(uid)
 
-    if not user:                                                                                        await update.message.reply_text("❌ Use /start primeiro."); return
+    if not user:
+        await update.message.reply_text("❌ Use /start primeiro."); return
     if not is_ativo(uid):
         await update.message.reply_text(
             "⛔ Seu acesso está inativo.\n\n💳 Para assinar por R$ 29,90/mês, fale com o suporte."
         ); return
-    if not user.get("iq_email"):                                                                        await update.message.reply_text("❌ Configure sua conta IQ Option com /configurar"); return
+    if not user.get("iq_email"):
+        await update.message.reply_text("❌ Configure sua conta IQ Option com /configurar"); return
     if user["bot_ligado"]:
         await update.message.reply_text("⚠️ Bot já está ligado! Use /parar para desligar."); return
 
-    await update.message.reply_text("⏳ Conectando à IQ Option...")                                 op = IQOperador(user)
+    await update.message.reply_text("⏳ Conectando à IQ Option...")
+    op = IQOperador(user)
     ok, info = op.conectar()
 
     if not ok:
         await update.message.reply_text(f"❌ Erro ao conectar: {info}\n\nVerifique email/senha com /configurar")
-        return                                                                                  
+        return
+
     operadores_ativos[uid] = op
     atualizar_config(uid, bot_ligado=1)
     await update.message.reply_text(
         f"✅ *Bot ligado!*\n\n💰 Saldo: R$ {info:.2f} ({user['iq_conta']})\n"
         f"👀 Monitorando sinais...\n\nUse /parar para desligar.",
-        parse_mode="Markdown"                                                                       )
+        parse_mode="Markdown"
+    )
 
 # ── /parar ────────────────────────────────
 
 async def cmd_parar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
-    user = get_user(uid)                                                                            if not user or not user["bot_ligado"]:
+    user = get_user(uid)
+    if not user or not user["bot_ligado"]:
         await update.message.reply_text("⚠️ Bot já está desligado."); return
 
     op = operadores_ativos.pop(uid, None)
     if op: op.desconectar()
     atualizar_config(uid, bot_ligado=0)
-    res = resultado_hoje(uid)                                                                       await update.message.reply_text(
+    res = resultado_hoje(uid)
+    await update.message.reply_text(
         f"🔴 *Bot desligado.*\n\n📊 Resultado de hoje:\n"
         f"✅ {res['wins']}W / ❌ {res['losses']}L | 💰 R$ {res['lucro']:.2f}",
         parse_mode="Markdown"
     )
 
-# ── /resultado ────────────────────────────                                                    
+# ── /resultado ────────────────────────────
+
 async def cmd_resultado(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     res = resultado_hoje(uid)
     taxa = (res["wins"] / res["total"] * 100) if res["total"] > 0 else 0
     await update.message.reply_text(
-        f"📊 *Resultado de hoje:*\n\n"                                                                  f"🔢 Total  : {res['total']} operações\n"
+        f"📊 *Resultado de hoje:*\n\n"
+        f"🔢 Total  : {res['total']} operações\n"
         f"✅ Wins   : {res['wins']}\n"
         f"❌ Losses : {res['losses']}\n"
         f"🎯 Taxa   : {taxa:.0f}%\n"
         f"💰 Lucro  : R$ {res['lucro']:.2f}",
         parse_mode="Markdown"
-    )                                                                                           
+    )
+
 # ── /configurar (ConversationHandler) ────
 
 async def cmd_configurar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not get_user(update.effective_user.id):
         await update.message.reply_text("❌ Use /start primeiro.")
-        return ConversationHandler.END                                                              await update.message.reply_text(
+        return ConversationHandler.END
+    await update.message.reply_text(
         "⚙️ *Configuração da IQ Option*\n\n📧 Digite seu *e-mail* da IQ Option:",
         parse_mode="Markdown"
-    )                                                                                               return CONF_EMAIL
-                                                                                                async def conf_email(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["email"] = update.message.text.strip()
-    await update.message.reply_text("🔒 Digite sua *senha* da IQ Option:", parse_mode="Markdown")                                                                                                   return CONF_SENHA
+    )
+    return CONF_EMAIL
 
-async def conf_senha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):                               ctx.user_data["senha"] = update.message.text.strip()
+async def conf_email(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["email"] = update.message.text.strip()
+    await update.message.reply_text("🔒 Digite sua *senha* da IQ Option:", parse_mode="Markdown")
+    return CONF_SENHA
+
+async def conf_senha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["senha"] = update.message.text.strip()
     kb = [[InlineKeyboardButton("📊 DEMO", callback_data="conta_PRACTICE"),
            InlineKeyboardButton("💰 REAL", callback_data="conta_REAL")]]
     await update.message.reply_text("📊 Qual tipo de conta?", reply_markup=InlineKeyboardMarkup(kb))
     return CONF_CONTA
-                                                                                                async def conf_conta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+
+async def conf_conta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     ctx.user_data["conta"] = q.data.replace("conta_", "")
     await q.edit_message_text(
         f"✅ Conta: *{ctx.user_data['conta']}*\n\n💰 Valor de entrada (R$):\nEx: `2` ou `5`",
         parse_mode="Markdown"
-    )                                                                                               return CONF_VALOR
+    )
+    return CONF_VALOR
 
 async def conf_valor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    try: ctx.user_data["valor"] = float(update.message.text.strip().replace(",","."))               except:
+    try: ctx.user_data["valor"] = float(update.message.text.strip().replace(",","."))
+    except:
         await update.message.reply_text("❌ Inválido. Ex: `5`", parse_mode="Markdown")
-        return CONF_VALOR                                                                           await update.message.reply_text("🔄 Multiplicador do Gale:\nEx: `2` (2x)", parse_mode="Markdown")
+        return CONF_VALOR
+    await update.message.reply_text("🔄 Multiplicador do Gale:\nEx: `2` (2x)", parse_mode="Markdown")
     return CONF_MULTI
-                                                                                                async def conf_multi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+
+async def conf_multi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: ctx.user_data["multi"] = float(update.message.text.strip().replace(",","."))
     except:
-        await update.message.reply_text("❌ Inválido. Ex: `2`", parse_mode="Markdown")                  return CONF_MULTI
+        await update.message.reply_text("❌ Inválido. Ex: `2`", parse_mode="Markdown")
+        return CONF_MULTI
     await update.message.reply_text("🔄 Máximo de Gales:\nEx: `1` ou `2`", parse_mode="Markdown")
     return CONF_GALES
 
 async def conf_gales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: ctx.user_data["gales"] = int(update.message.text.strip())
-    except:                                                                                             await update.message.reply_text("❌ Inválido. Ex: `1`", parse_mode="Markdown")
+    except:
+        await update.message.reply_text("❌ Inválido. Ex: `1`", parse_mode="Markdown")
         return CONF_GALES
     await update.message.reply_text(
         "🛑 *Stop Loss* (R$) — para ao perder esse valor no dia\n`0` para desativar",
         parse_mode="Markdown"
     )
-    return CONF_SL                                                                              
+    return CONF_SL
+
 async def conf_sl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: ctx.user_data["sl"] = float(update.message.text.strip().replace(",","."))
     except:
         await update.message.reply_text("❌ Inválido. Ex: `20`", parse_mode="Markdown")
         return CONF_SL
     await update.message.reply_text(
-        "🏆 *Stop Win* (R$) — para ao lucrar esse valor no dia\n`0` para desativar",                    parse_mode="Markdown"
+        "🏆 *Stop Win* (R$) — para ao lucrar esse valor no dia\n`0` para desativar",
+        parse_mode="Markdown"
     )
     return CONF_SW
 
 async def conf_sw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    try: ctx.user_data["sw"] = float(update.message.text.strip().replace(",","."))                  except:
+    try: ctx.user_data["sw"] = float(update.message.text.strip().replace(",","."))
+    except:
         await update.message.reply_text("❌ Inválido. Ex: `30`", parse_mode="Markdown")
         return CONF_SW
-                                                                                                    d = ctx.user_data
+
+    d = ctx.user_data
     atualizar_config(uid,
         iq_email=d["email"], iq_senha=d["senha"], iq_conta=d["conta"],
         valor_entrada=d["valor"], multiplicador=d["multi"], max_gales=d["gales"],
         stop_loss=d["sl"], stop_win=d["sw"]
     )
-    await update.message.reply_text(                                                                    f"✅ *Configuração salva!*\n\n"
+    await update.message.reply_text(
+        f"✅ *Configuração salva!*\n\n"
         f"📧 E-mail  : {d['email']}\n"
         f"📊 Conta   : {d['conta']}\n"
         f"💰 Entrada : R$ {d['valor']}\n"
         f"🔄 Gale    : {d['multi']}x (max {d['gales']})\n"
         f"🛑 Stop L  : R$ {d['sl']}\n"
-        f"🏆 Stop W  : R$ {d['sw']}\n\n"                                                                f"Use /iniciar para ligar o bot! 🚀",
+        f"🏆 Stop W  : R$ {d['sw']}\n\n"
+        f"Use /iniciar para ligar o bot! 🚀",
         parse_mode="Markdown"
     )
-    return ConversationHandler.END                                                              
+    return ConversationHandler.END
+
 async def conf_cancelar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Configuração cancelada.")
-    return ConversationHandler.END                                                              
+    return ConversationHandler.END
+
 # ── ADMIN ─────────────────────────────────
 
 async def cmd_ativar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
-        await update.message.reply_text("Uso: /ativar <telegram_id> [dias]"); return                try:
+        await update.message.reply_text("Uso: /ativar <telegram_id> [dias]"); return
+    try:
         tid  = int(ctx.args[0])
         dias = int(ctx.args[1]) if len(ctx.args) > 1 else 30
         ativar_usuario(tid, dias)
         u    = get_user(tid)
         nome = u["nome"] if u else str(tid)
         await update.message.reply_text(f"✅ {nome} ativado por {dias} dias!")
-        await ctx.bot.send_message(tid,                                                                     f"🎉 *Seu acesso foi ativado!*\n\n✅ Plano ativo por *{dias} dias*\n\nUse /iniciar para ligar o bot.",
-            parse_mode="Markdown"                                                                       )
+        await ctx.bot.send_message(tid,
+            f"🎉 *Seu acesso foi ativado!*\n\n✅ Plano ativo por *{dias} dias*\n\nUse /iniciar para ligar o bot.",
+            parse_mode="Markdown"
+        )
     except Exception as e:
         await update.message.reply_text(f"Erro: {e}")
 
 async def cmd_desativar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
-    if not ctx.args:                                                                                    await update.message.reply_text("Uso: /desativar <telegram_id>"); return
+    if not ctx.args:
+        await update.message.reply_text("Uso: /desativar <telegram_id>"); return
     try:
         desativar_usuario(int(ctx.args[0]))
         await update.message.reply_text(f"✅ Usuário {ctx.args[0]} desativado.")
     except Exception as e:
         await update.message.reply_text(f"Erro: {e}")
-                                                                                                async def cmd_usuarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+
+async def cmd_usuarios(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     rows = listar_usuarios()
     if not rows:
         await update.message.reply_text("Nenhum usuário cadastrado."); return
     texto = "👥 USUÁRIOS CADASTRADOS\n\n"
-    for tid, username, nome, exp, ativo, bot_on in rows:                                                nome_s     = str(nome or "Sem nome")
+    for tid, username, nome, exp, ativo, bot_on in rows:
+        nome_s     = str(nome or "Sem nome")
         username_s = str(username or "sem_user")
         exp_s      = str(exp or "")[:10]
         texto += (f"{'🟢' if ativo else '🔴'}{'🤖' if bot_on else '💤'} "
                   f"{nome_s} (@{username_s})\n   ID: {tid} | Exp: {exp_s}\n\n")
     await update.message.reply_text(texto)
-                                                                                                async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+
+async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id): return
     if not ctx.args:
         await update.message.reply_text("Uso: /broadcast <mensagem>"); return
     msg = " ".join(ctx.args)
     ok = falha = 0
-    for (tid, *_) in listar_usuarios():                                                                 try:
+    for (tid, *_) in listar_usuarios():
+        try:
             await ctx.bot.send_message(tid, f"📢 *Aviso:*\n\n{msg}", parse_mode="Markdown")
             ok += 1
         except: falha += 1
     await update.message.reply_text(f"✅ Enviado para {ok}. ❌ {falha} falhas.")
 
-# ════════════════════════════════════════════                                                  #  📡  LISTENER DE SINAIS (Telethon)
+# ════════════════════════════════════════════
+#  📡  LISTENER DE SINAIS (Telethon)
 # ════════════════════════════════════════════
 
 async def executar_para_usuario(uid, sinal, app):
     user = get_user(uid)
     if not user or not user["bot_ligado"]:
-        return                                                                                  
+        return
+
     res = resultado_hoje(uid)
     if user["stop_loss"] > 0 and res["lucro"] <= -user["stop_loss"]:
         await app.bot.send_message(uid,
             f"🛑 *Stop Loss atingido!*\nLucro no dia: R$ {res['lucro']:.2f}", parse_mode="Markdown")
-        atualizar_config(uid, bot_ligado=0); return                                                 if user["stop_win"] > 0 and res["lucro"] >= user["stop_win"]:
+        atualizar_config(uid, bot_ligado=0); return
+    if user["stop_win"] > 0 and res["lucro"] >= user["stop_win"]:
         await app.bot.send_message(uid,
             f"🏆 *Stop Win atingido!*\nLucro no dia: R$ {res['lucro']:.2f}", parse_mode="Markdown")
         atualizar_config(uid, bot_ligado=0); return
 
-    await app.bot.send_message(uid,                                                                     f"⚛️ *SINAL DETECTADO*\n{'─'*25}\n"
+    await app.bot.send_message(uid,
+        f"⚛️ *SINAL DETECTADO*\n{'─'*25}\n"
         f"💰 Ativo    : `{sinal.get('ativo')}`\n"
         f"📈 Direção  : *{sinal.get('direcao','').upper()}*\n"
         f"⌛ Expiração: M{sinal.get('expiracao')}\n"
         f"📊 Confiança: {sinal.get('confianca','?')}%\n"
         f"🛡️ Score IA : {sinal.get('score','?')}/100\n"
-        f"🚀 Operando...", parse_mode="Markdown"                                                    )
+        f"🚀 Operando...", parse_mode="Markdown"
+    )
 
     op = operadores_ativos.get(uid)
     if not op:
         op = IQOperador(user)
         ok, info = op.conectar()
-        if not ok:                                                                                          await app.bot.send_message(uid, f"❌ Erro IQ Option: {info}"); return
+        if not ok:
+            await app.bot.send_message(uid, f"❌ Erro IQ Option: {info}"); return
         operadores_ativos[uid] = op
 
-    loop = asyncio.get_event_loop()                                                                 resultados = await loop.run_in_executor(None, op.operar, sinal)
-                                                                                                    msg = f"📊 *RESULTADO*\n{'─'*25}\n"
-    for r in resultados:                                                                                if "erro" in r:
-            msg += f"❌ Erro: {r['erro']}\n"                                                            elif r["status"] == "win":
-            g = f" (Gale {r['gale']})" if r["gale"] > 0 else ""                                             msg += f"✅ *WIN{g}* +R$ {r['lucro']:.2f}\n"
-        elif r["status"] == "loss":                                                                         g = f" (Gale {r['gale']})" if r["gale"] > 0 else ""
-            msg += f"❌ *LOSS{g}* -R$ {r['valor']:.2f}\n"                                               elif r["status"] == "equal":
-            msg += "〰️ *Empate*\n"                                                              
-    res_hoje = resultado_hoje(uid)                                                                  msg += f"{'─'*25}\n💰 Lucro no dia: R$ {res_hoje['lucro']:.2f}"
-    await app.bot.send_message(uid, msg, parse_mode="Markdown")                                 
-                                                                                                async def rodar_listener(app):
-    import os                                                                                       from telethon.sessions import StringSession
-    # Usa string de sessão se disponível (Railway), senão arquivo local (Termux)                    session_str = TG_SESSION_STR or os.environ.get("TG_SESSION_STRING", "")
-    session = StringSession(session_str) if session_str else SESSION                                async with TelegramClient(session, TG_API_ID, TG_API_HASH) as client:
-        logger.info("✅ Telethon conectado!")                                                   
-        entity = None                                                                                   invite = CANAL_LINK.strip("/").split("+")[-1]
-        try:                                                                                                result = await client(ImportChatInviteRequest(invite))
-            entity = result.chats[0]                                                                    except Exception as e:
-            if "already" in str(e).lower():                                                                     async for d in client.iter_dialogs():
-                    t = getattr(d.entity, 'title', '') or ''                                                        if 'quantum' in t.lower() or 'ia' in t.lower():
-                        entity = d.entity; break                                                                if not entity:
-                    async for d in client.iter_dialogs():                                                               if isinstance(d.entity, (Channel, Chat)):
-                            entity = d.entity; break                                                        else:
-                logger.error(f"Canal: {e}"); return                                             
-        if not entity:                                                                                      logger.error("Canal não encontrado!"); return
-                                                                                                        logger.info(f"👀 Escutando: {getattr(entity,'title','canal')}")
-                                                                                                        @client.on(events.NewMessage(chats=entity))
-        async def handler(event):                                                                           texto = event.message.text or ""
-            sinal = parse_sinal(texto)                                                                      if not sinal: return
-                                                                                                            logger.info(f"Sinal: {sinal.get('ativo')} {sinal.get('direcao','').upper()}")
-                                                                                                            if "horario" in sinal:
-                agora = datetime.now()                                                                          h, m  = map(int, sinal["horario"].split(":"))
-                alvo  = agora.replace(hour=h, minute=m, second=0, microsecond=0)                                diff  = (alvo - agora).total_seconds()
-                if 0 < diff <= 90:                                                                                  await asyncio.sleep(diff - 0.5)
-                                                                                                            uids = usuarios_bot_ligado()
-            logger.info(f"Disparando para {len(uids)} usuário(s)...")                                       for uid in uids:
-                asyncio.create_task(executar_para_usuario(uid, sinal, app))                     
-        await client.run_until_disconnected()                                                   
-# ════════════════════════════════════════════                                                  #  🚀  MAIN
-# ════════════════════════════════════════════                                                  
-async def post_init(app):                                                                           asyncio.create_task(rodar_listener(app))
-                                                                                                async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
-    """Captura erros de rede e outros sem travar o bot."""                                          err = ctx.error
+    loop = asyncio.get_event_loop()
+    resultados = await loop.run_in_executor(None, op.operar, sinal)
+
+    msg = f"📊 *RESULTADO*\n{'─'*25}\n"
+    for r in resultados:
+        if "erro" in r:
+            msg += f"❌ Erro: {r['erro']}\n"
+        elif r["status"] == "win":
+            g = f" (Gale {r['gale']})" if r["gale"] > 0 else ""
+            msg += f"✅ *WIN{g}* +R$ {r['lucro']:.2f}\n"
+        elif r["status"] == "loss":
+            g = f" (Gale {r['gale']})" if r["gale"] > 0 else ""
+            msg += f"❌ *LOSS{g}* -R$ {r['valor']:.2f}\n"
+        elif r["status"] == "equal":
+            msg += "〰️ *Empate*\n"
+
+    res_hoje = resultado_hoje(uid)
+    msg += f"{'─'*25}\n💰 Lucro no dia: R$ {res_hoje['lucro']:.2f}"
+    await app.bot.send_message(uid, msg, parse_mode="Markdown")
+
+
+async def rodar_listener(app):
+    import os
+    from telethon.sessions import StringSession
+    # Usa string de sessão se disponível (Railway), senão arquivo local (Termux)
+    session_str = TG_SESSION_STR or os.environ.get("TG_SESSION_STRING", "")
+    session = StringSession(session_str) if session_str else SESSION
+    async with TelegramClient(session, TG_API_ID, TG_API_HASH) as client:
+        logger.info("✅ Telethon conectado!")
+
+        entity = None
+        invite = CANAL_LINK.strip("/").split("+")[-1]
+        try:
+            result = await client(ImportChatInviteRequest(invite))
+            entity = result.chats[0]
+        except Exception as e:
+            if "already" in str(e).lower():
+                async for d in client.iter_dialogs():
+                    t = getattr(d.entity, 'title', '') or ''
+                    if 'quantum' in t.lower() or 'ia' in t.lower():
+                        entity = d.entity; break
+                if not entity:
+                    async for d in client.iter_dialogs():
+                        if isinstance(d.entity, (Channel, Chat)):
+                            entity = d.entity; break
+            else:
+                logger.error(f"Canal: {e}"); return
+
+        if not entity:
+            logger.error("Canal não encontrado!"); return
+
+        logger.info(f"👀 Escutando: {getattr(entity,'title','canal')}")
+
+        @client.on(events.NewMessage(chats=entity))
+        async def handler(event):
+            texto = event.message.text or ""
+            sinal = parse_sinal(texto)
+            if not sinal: return
+
+            logger.info(f"Sinal: {sinal.get('ativo')} {sinal.get('direcao','').upper()}")
+
+            if "horario" in sinal:
+                agora = datetime.now()
+                h, m  = map(int, sinal["horario"].split(":"))
+                alvo  = agora.replace(hour=h, minute=m, second=0, microsecond=0)
+                diff  = (alvo - agora).total_seconds()
+                if 0 < diff <= 90:
+                    await asyncio.sleep(diff - 0.5)
+
+            uids = usuarios_bot_ligado()
+            logger.info(f"Disparando para {len(uids)} usuário(s)...")
+            for uid in uids:
+                asyncio.create_task(executar_para_usuario(uid, sinal, app))
+
+        await client.run_until_disconnected()
+
+# ════════════════════════════════════════════
+#  🚀  MAIN
+# ════════════════════════════════════════════
+
+async def post_init(app):
+    asyncio.create_task(rodar_listener(app))
+
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    """Captura erros de rede e outros sem travar o bot."""
+    err = ctx.error
     # Erros de rede são normais (queda de internet) — só loga e segue
     from telegram.error import NetworkError, TimedOut
-    if isinstance(err, (NetworkError, TimedOut)):                                                       logger.warning(f"⚠️ Erro de rede (reconectando): {err}")
+    if isinstance(err, (NetworkError, TimedOut)):
+        logger.warning(f"⚠️ Erro de rede (reconectando): {err}")
         return
-    logger.error(f"❌ Erro inesperado: {err}", exc_info=err)                                    
+    logger.error(f"❌ Erro inesperado: {err}", exc_info=err)
+
 def main():
     if not BOT_TOKEN:
-        raise ValueError("Preencha BOT_TOKEN na seção CONFIG do script!")                           if not TG_API_ID or not TG_API_HASH:
+        raise ValueError("Preencha BOT_TOKEN na seção CONFIG do script!")
+    if not TG_API_ID or not TG_API_HASH:
         raise ValueError("Preencha TG_API_ID e TG_API_HASH na seção CONFIG!")
-                                                                                                    init_db()
+
+    init_db()
     logger.info("✅ Banco iniciado.")
 
     app = (
         Application.builder()
         .token(BOT_TOKEN)
         .post_init(post_init)
-        .build()                                                                                    )
+        .build()
+    )
 
     conv = ConversationHandler(
-        entry_points=[CommandHandler("configurar", cmd_configurar)],                                    states={
+        entry_points=[CommandHandler("configurar", cmd_configurar)],
+        states={
             CONF_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_email)],
-            CONF_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_senha)],                      CONF_CONTA: [CallbackQueryHandler(conf_conta, pattern="^conta_")],
+            CONF_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_senha)],
+            CONF_CONTA: [CallbackQueryHandler(conf_conta, pattern="^conta_")],
             CONF_VALOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_valor)],
             CONF_MULTI: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_multi)],
-            CONF_GALES: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_gales)],                      CONF_SL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_sl)],
+            CONF_GALES: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_gales)],
+            CONF_SL:    [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_sl)],
             CONF_SW:    [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_sw)],
         },
-        fallbacks=[CommandHandler("cancelar", conf_cancelar)],                                      )
+        fallbacks=[CommandHandler("cancelar", conf_cancelar)],
+    )
 
     app.add_handler(CommandHandler("start",      cmd_start))
     app.add_handler(CommandHandler("status",     cmd_status))
     app.add_handler(CommandHandler("iniciar",    cmd_iniciar))
     app.add_handler(CommandHandler("parar",      cmd_parar))
     app.add_handler(CommandHandler("resultado",  cmd_resultado))
-    app.add_handler(conv)                                                                           app.add_handler(CommandHandler("ativar",     cmd_ativar))
+    app.add_handler(conv)
+    app.add_handler(CommandHandler("ativar",     cmd_ativar))
     app.add_handler(CommandHandler("desativar",  cmd_desativar))
     app.add_handler(CommandHandler("usuarios",   cmd_usuarios))
     app.add_handler(CommandHandler("broadcast",  cmd_broadcast))
     app.add_error_handler(error_handler)
 
-    logger.info("🚀 Bot iniciado!")                                                                 app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+    logger.info("🚀 Bot iniciado!")
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
