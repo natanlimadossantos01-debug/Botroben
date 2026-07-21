@@ -686,14 +686,26 @@ async def executar_para_usuario(uid, sinal, app):
 
         op = operadores_ativos.get(uid)
         if not op:
+            logger.info(f"[{uid}] Criando novo IQOperador e conectando...")
             op = IQOperador(user)
             ok, info = op.conectar()
             if not ok:
+                logger.error(f"[{uid}] Falha ao conectar IQ Option: {info}")
                 await _enviar_com_retry(app.bot, uid, f"❌ Erro IQ Option: {info}"); return
+            logger.info(f"[{uid}] IQ Option conectado! Saldo: {info}")
             operadores_ativos[uid] = op
+        else:
+            logger.info(f"[{uid}] Reusando IQOperador existente")
 
+        logger.info(f"[{uid}] Chamando run_in_executor -> op.operar...")
         loop = asyncio.get_event_loop()
-        resultados = await loop.run_in_executor(None, op.operar, sinal)
+        try:
+            resultados = await loop.run_in_executor(None, op.operar, sinal)
+        except Exception as exec_err:
+            logger.error(f"[{uid}] EXCEÇÃO no executor: {exec_err}", exc_info=True)
+            await _enviar_com_retry(app.bot, uid, f"❌ Erro na operação: {exec_err}")
+            return
+        logger.info(f"[{uid}] Executor finalizado. Resultados: {resultados}")
 
         msg = f"📊 *RESULTADO*\n{'─'*25}\n"
         for r in resultados:
