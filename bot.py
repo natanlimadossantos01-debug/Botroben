@@ -3,39 +3,24 @@
 """
 ⚛️ QUANTUM IQ BOT — Multi-usuário (arquivo único)
 Configure as variáveis na seção CONFIG abaixo antes de rodar.
-"""
-
+"""                                                                                             
 # ════════════════════════════════════════════
 #  ⚙️  CONFIG — preencha aqui
 # ════════════════════════════════════════════
-BOT_TOKEN      = "8233598336:AAHUtMg14-2hcOFObRhrBGsO4JIEyyA7gtI"
-ADMIN_ID       = 6058265294
-TG_API_ID      = 22453120
-TG_API_HASH    = "89826a4104518e9ed650cdb451ad8b53"
-TG_SESSION_STR = "1AZWarzQBu6K7sCuqn6BbtMWuH1g3aYs3PYT2Csv4uuXASN1k3L4dTY4VV3gx3Qn6Jb2hNQM8VZDp2jdjk0u3ci4tGrGEl8hVl_Z8BWp1NwFK1rU2rb4QTQnAQk3qIpg931QyiqW1m-PLpuCa6WJcrKGSNvtO6g7T_7nG1EzIRLyXHVl-46c1NDK_JqKzB2ym7kZcjScMRL2KkUgXoBbTjwv2dASbEHnSHNGM_thmun6WUQlMDnMmD5VFsDIR-GiP1FcFidKdFpm0cJvJqdt31l7jJWqCgd_E1efAm5mZVYak_wEYffHYYUtwPlgD0webWFn2tiH7bFX4D6BoUqy_S7ubdiPuIdw="
-CANAL_LINK     = "https://t.me/+_6C6EMQUg1syODdh"
-DB_PATH        = "quantum.db"
-SESSION        = "quantum_server"
-# ════════════════════════════════════════════
+BOT_TOKEN      = "8233598336:AAHUtMg14-2hcOFObRhrBGsO4JIEyyA7gtI"   # Token do @BotFather
+ADMIN_ID       = 6058265294    # Seu ID numérico do Telegram (@userinfobot)
+TG_API_ID      = 22453120    # my.telegram.org → App api_id                                     TG_API_HASH    = "89826a4104518e9ed650cdb451ad8b53"   # my.telegram.org → App api_hash
+TG_SESSION_STR = "1AZWarzQBu6K7sCuqn6BbtMWuH1g3aYs3PYT2Csv4uuXASN1k3L4dTY4VV3gx3Qn6Jb2hNQM8VZDp2jdjk0u3ci4tGrGEl8hVl_Z8BWp1NwFK1rU2rb4QTQnAQk3qIpg931QyiqW1m-PLpuCa6WJcrKGSNvtO6g7T_7nG1EzIRLyXHVl-46c1NDK_JqKzB2ym7kZcjScMRL2KkUgXoBbTjwv2dASbEHnSHNGM_thmun6WUQlMDnMmD5VFsDIR-GiP1FcFidKdFpm0cJvJqdt31l7jJWqCgd_E1efAm5mZVYak_wEYffHYYUtwPlgD0webWFn2tiH7bFX4D6BoUqy_S7ubdiPuIdw="   # Gerado pelo gerar_sessao.py (deixe "" para usar arquivo local)
+CANAL_LINK     = "https://t.me/+_6C6EMQUg1syODdh"                                               DB_PATH        = "quantum.db"
+SESSION        = "quantum_server"                                                               # ════════════════════════════════════════════
 
 import asyncio
-import logging
-import os
-import re
+import logging                                                                                  import re
 import sqlite3
-import time
 from datetime import datetime, timedelta
 
-# ════════════════════════════════════════════
-# 🇧🇷 HORÁRIO DE BRASÍLIA
-# ════════════════════════════════════════════
-os.environ['TZ'] = 'America/Sao_Paulo'
-time.tzset()
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ConversationHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup                         from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,                                              MessageHandler, ConversationHandler, filters, ContextTypes
 )
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import ImportChatInviteRequest
@@ -222,7 +207,7 @@ def parse_sinal(texto):
     return s if ("ativo" in s and "direcao" in s) else None
 
 # ════════════════════════════════════════════
-#  💹  OPERADOR IQ OPTION (CORRIGIDO)
+#  💹  OPERADOR IQ OPTION
 # ════════════════════════════════════════════
 
 class IQOperador:
@@ -244,6 +229,20 @@ class IQOperador:
             if self.api: self.api.close()
         except: pass
 
+    def checar_resultado(self, id_op):
+        try:
+            res = self.api.check_win_v3(id_op)
+            if isinstance(res, tuple):
+                status, lucro = res
+                return str(status).lower(), float(lucro)
+            lucro = float(res)
+            if lucro > 0:  return "win",   lucro
+            if lucro < 0:  return "loss",  abs(lucro)
+            return "equal", 0.0
+        except Exception as e:
+            logger.error(f"check_win: {e}")
+            return "erro", 0.0
+
     def operar(self, sinal):
         user      = self.user
         ativo     = sinal["ativo"]
@@ -257,71 +256,32 @@ class IQOperador:
         while tentativa <= max_gales:
             val = round(valor * (user["multiplicador"] ** tentativa), 2)
             try:
-                logger.info(f"🎯 Comprando: {ativo} {direcao} R${val} M{exp}")
                 ok, id_op = self.api.buy(val, ativo, direcao, exp)
-                
                 if not ok:
-                    logger.error(f"❌ Ordem rejeitada: {id_op}")
-                    resultados.append({"erro": f"Ordem rejeitada: {id_op}"})
+                    resultados.append({"erro": "Ordem rejeitada"})
                     break
 
-                logger.info(f"✅ Ordem aberta: {id_op}")
-                
-                # Aguarda a vela fechar
-                tempo_vela = exp * 60 + 10
-                logger.info(f"⏳ Aguardando {tempo_vela}s para resultado...")
-                time.sleep(tempo_vela)
+                status, lucro = self.checar_resultado(id_op)
 
-                # Verifica resultado
-                logger.info(f"🔍 Verificando ordem {id_op}...")
-                try:
-                    status, lucro = self.api.check_win_v3(id_op)
-                    logger.info(f"📊 Resultado: status={status}, lucro={lucro}")
-                except Exception as e:
-                    logger.error(f"❌ Erro ao verificar: {e}")
-                    resultados.append({"erro": f"Erro ao verificar: {e}"})
+                if status == "win":
+                    salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "win", lucro)
+                    resultados.append({"status":"win","valor":val,"lucro":lucro,"gale":tentativa})
                     break
-
-                # Converte resultado
-                if isinstance(status, bool):
-                    if status:
-                        status = "win"
-                        lucro = float(lucro) if lucro else val * 0.8
-                    else:
-                        status = "loss"
-                        lucro = -val
-                
-                status = str(status).lower() if status else "erro"
-                lucro = float(lucro) if lucro else -val
-
-                if status in ("win", "true"):
-                    salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "win", abs(lucro))
-                    resultados.append({"status":"win","valor":val,"lucro":abs(lucro),"gale":tentativa})
-                    logger.info(f"🏆 WIN! +R${abs(lucro):.2f}")
-                    break
-                    
-                elif status in ("loss", "loose", "false"):
+                elif status in ("loss","loose"):
                     salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "loss", -val)
                     resultados.append({"status":"loss","valor":val,"gale":tentativa})
-                    logger.info(f"💔 LOSS! -R${val:.2f}")
                     tentativa += 1
-                    
                 elif status == "equal":
                     salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "equal", 0)
                     resultados.append({"status":"equal","valor":val,"gale":tentativa})
-                    logger.info(f"〰️ EMPATE")
                     break
                 else:
-                    logger.warning(f"⚠️ Status desconhecido: {status}")
-                    resultados.append({"status":str(status),"valor":val,"gale":tentativa})
+                    resultados.append({"status":status,"valor":val,"gale":tentativa})
                     break
-                    
             except Exception as e:
-                logger.error(f"❌ Erro na operação: {e}")
                 resultados.append({"erro": str(e)})
                 break
 
-        logger.info(f"📊 Resultados finais: {resultados}")
         return resultados
 
 # ════════════════════════════════════════════
@@ -634,6 +594,7 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ════════════════════════════════════════════
 
 async def _enviar_com_retry(bot, uid, texto, tentativas=3, **kwargs):
+    """Envia mensagem com até N tentativas em caso de NetworkError."""
     from telegram.error import NetworkError, TimedOut
     for i in range(tentativas):
         try:
@@ -641,7 +602,7 @@ async def _enviar_com_retry(bot, uid, texto, tentativas=3, **kwargs):
             return
         except (NetworkError, TimedOut) as e:
             if i < tentativas - 1:
-                await asyncio.sleep(2 ** i)
+                await asyncio.sleep(2 ** i)  # backoff: 1s, 2s, 4s
             else:
                 logger.warning(f"⚠️ Falha ao enviar msg para {uid} após {tentativas} tentativas: {e}")
 
@@ -709,7 +670,9 @@ async def executar_para_usuario(uid, sinal, app):
 
 
 async def rodar_listener(app):
+    import os
     from telethon.sessions import StringSession
+    # Usa string de sessão se disponível (Railway), senão arquivo local (Termux)
     session_str = TG_SESSION_STR or os.environ.get("TG_SESSION_STRING", "")
     session = StringSession(session_str) if session_str else SESSION
     async with TelegramClient(session, TG_API_ID, TG_API_HASH) as client:
@@ -749,6 +712,7 @@ async def rodar_listener(app):
             uids = usuarios_bot_ligado()
             horario = sinal.get("horario", "")
 
+            # ── Notificação imediata de sinal recebido ──
             for uid in uids:
                 try:
                     direcao_emoji = "🟢 CALL" if sinal.get("direcao") == "call" else "🔴 PUT"
@@ -766,6 +730,7 @@ async def rodar_listener(app):
                 except Exception as e:
                     logger.warning(f"Aviso sinal para {uid}: {e}")
 
+            # ── Aguarda o horário de entrada ──
             if horario:
                 agora = datetime.now()
                 h, m  = map(int, horario.split(":"))
@@ -800,7 +765,9 @@ async def post_init(app):
     asyncio.create_task(rodar_listener(app))
 
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    """Captura erros de rede e outros sem travar o bot."""
     err = ctx.error
+    # Erros de rede são normais (queda de internet) — só loga e segue
     from telegram.error import NetworkError, TimedOut
     if isinstance(err, (NetworkError, TimedOut)):
         logger.warning(f"⚠️ Erro de rede (reconectando): {err}")
@@ -854,7 +821,7 @@ def main():
     app.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
-        bootstrap_retries=-1,
+        bootstrap_retries=-1,   # tenta infinitamente até conectar
     )
 
 if __name__ == "__main__":
