@@ -266,21 +266,24 @@ class IQOperador:
         except: pass
 
     def checar_resultado(self, id_op):
-        """Igual ao original que funciona no Termux — com reconexão antes de checar."""
-        # Garante conexão antes de checar (pode ter caído durante o sleep)
+        """Compatível com qualquer versão da API — idêntico ao script original."""
+        # Garante conexão antes de checar (pode ter caído durante o sleep no Railway)
         self._garantir_conexao()
         try:
-            res = self.api.check_win_v3(id_op)
-            logger.info(f"[IQ] check_win_v3({id_op}) = {res}")
-            if isinstance(res, tuple):
-                status, lucro = res
+            resultado = self.api.check_win_v3(id_op)
+            logger.info(f"[IQ] check_win_v3({id_op}) = {resultado}")
+            if isinstance(resultado, tuple):
+                status, lucro = resultado
                 return str(status).lower(), float(lucro)
-            lucro = float(res)
-            if lucro > 0:  return "win",   lucro
-            if lucro < 0:  return "loss",  abs(lucro)
-            return "equal", 0.0
+            elif isinstance(resultado, (int, float)):
+                lucro = float(resultado)
+                if lucro > 0:  return "win",   lucro
+                if lucro < 0:  return "loose",  abs(lucro)
+                return "equal", 0.0
+            else:
+                return str(resultado).lower(), 0.0
         except Exception as e:
-            logger.error(f"check_win: {e}")
+            logger.error(f"[IQ] check_win erro: {e}")
             return "erro", 0.0
 
     def operar(self, sinal):
@@ -732,45 +735,70 @@ async def rodar_listener(app):
     session = StringSession(TG_SESSION_STR) if TG_SESSION_STR else SESSION
     async with TelegramClient(session, TG_API_ID, TG_API_HASH) as client:
         logger.info("✅ Telethon conectado!")
+        logger.info("🔍 Resolvendo canal...")
 
         entity = None
-        invite = CANAL_LINK.strip("/").split("+")[-1]
+        invite_hash = CANAL_LINK.strip("/").split("+")[-1]
+
         try:
-            result = await client(ImportChatInviteRequest(invite))
+            result = await client(ImportChatInviteRequest(invite_hash))
             entity = result.chats[0]
+            logger.info(f"✅ Canal acessado: {entity.title}")
         except Exception as e:
-            if "already" in str(e).lower():
+            erro = str(e).lower()
+            if "already" in erro or "user already" in erro:
+                logger.info("Já é membro. Buscando canal nos diálogos...")
+                # Tenta por palavras-chave no título
                 async for d in client.iter_dialogs():
                     t = getattr(d.entity, 'title', '') or ''
-                    if 'quantum' in t.lower() or 'ia' in t.lower():
-                        entity = d.entity; break
+                    if ('quantum' in t.lower() or 'sinal' in t.lower()
+                            or 'ia' in t.lower() or 'robin' in t.lower()):
+                        entity = d.entity
+                        logger.info(f"✅ Canal encontrado: {t}")
+                        break
+                # Fallback: pega o primeiro canal/grupo disponível
                 if not entity:
                     async for d in client.iter_dialogs():
                         if isinstance(d.entity, (Channel, Chat)):
-                            entity = d.entity; break
+                            entity = d.entity
+                            logger.warning(f"⚠️ Usando canal fallback: {d.name}")
+                            break
             else:
-                logger.error(f"Canal: {e}"); return
+                logger.error(f"Erro ao acessar canal: {e}")
+                return
 
         if not entity:
-            logger.error("Canal não encontrado!"); return
+            logger.error("Canal não encontrado! Verifique CANAL_LINK.")
+            return
 
-        logger.info(f"👀 Escutando: {getattr(entity,'title','canal')}")
+        logger.info(f"👀 Escutando: {getattr(entity, 'title', 'canal')}")
 
         @client.on(events.NewMessage(chats=entity))
         async def handler(event):
             texto = event.message.text or ""
+
+            # Log de toda mensagem recebida (igual ao script original)
+            preview = texto[:70].replace('\n', ' ').strip()
+            logger.info(f"📩 Mensagem: {preview}...")
+
             sinal = parse_sinal(texto)
-            if not sinal: return
+            if not sinal:
+                logger.info("↩️ Não é sinal válido, ignorando.")
+                return
 
-            logger.info(f"Sinal: {sinal.get('ativo')} {sinal.get('direcao','').upper()}")
+            logger.info(f"⚛️ SINAL DETECTADO: {sinal.get('ativo')} {sinal.get('direcao','').upper()} M{sinal.get('expiracao')} conf={sinal.get('confianca','?')}% score={sinal.get('score','?')}")
 
-            uids = usuarios_bot_ligado()
+            uids    = usuarios_bot_ligado()
             horario = sinal.get("horario", "")
 
+            if not uids:
+                logger.info("Nenhum usuário com bot ligado.")
+                return
+
             # ── Notificação imediata de sinal recebido ──
+            direcao_emoji = "🟢 CALL" if sinal.get("direcao") == "call" else "🔴 PUT"
             for uid in uids:
                 try:
-                    direcao_emoji = "🟢 CALL" if sinal.get("direcao") == "call" else "🔴 PUT"
                     await app.bot.send_message(uid,
                         f"📡 *SINAL RECEBIDO*\n{'─'*25}\n"
                         f"💰 Ativo     : `{sinal.get('ativo')}`\n"
@@ -785,28 +813,32 @@ async def rodar_listener(app):
                 except Exception as e:
                     logger.warning(f"Aviso sinal para {uid}: {e}")
 
-            # ── Aguarda o horário de entrada ──
+            # ── Aguarda o horário de entrada (lógica do script original) ──
             if horario:
                 agora = datetime.now()
                 h, m  = map(int, horario.split(":"))
                 alvo  = agora.replace(hour=h, minute=m, second=0, microsecond=0)
-                if alvo < agora:
-                    alvo += timedelta(days=1)
-                diff = (alvo - agora).total_seconds()
-                if 0 < diff <= 600:
-                    logger.info(f"⏳ Aguardando {diff:.0f}s para entrar às {horario}")
-                    await asyncio.sleep(max(diff - 1, 0))
-                elif diff > 600:
-                    logger.info(f"⚠️ Sinal muito antecipado ({diff:.0f}s) — ignorando")
+                diff  = (alvo - agora).total_seconds()
+
+                if 0 < diff <= 90:
+                    # Horário futuro próximo — aguarda, entra 0.5s antes
+                    logger.info(f"⏰ Aguardando {diff:.0f}s para horário exato ({horario})...")
+                    await asyncio.sleep(max(diff - 0.5, 0))
+                elif -90 <= diff <= 0:
+                    # Sinal chegou atrasado até 90s — entra imediatamente
+                    logger.info(f"⚠️ Horário {horario} já passou ({abs(diff):.0f}s atrás), operando agora...")
+                else:
+                    # Fora do prazo (muito futuro ou muito antigo)
+                    logger.info(f"⚠️ Sinal fora do prazo (diff={diff:.0f}s) — ignorando")
                     for uid in uids:
                         try:
                             await app.bot.send_message(uid,
-                                f"⚠️ Sinal ignorado — horário muito distante ({int(diff//60)} min).",
+                                f"⚠️ Sinal ignorado — horário muito distante ({abs(int(diff//60))} min).",
                                 parse_mode="Markdown")
                         except: pass
                     return
 
-            logger.info(f"Disparando para {len(uids)} usuário(s)...")
+            logger.info(f"🚀 Disparando para {len(uids)} usuário(s)...")
             for uid in uids:
                 asyncio.create_task(executar_para_usuario(uid, sinal, app))
 
