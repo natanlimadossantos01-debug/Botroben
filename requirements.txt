@@ -1,3 +1,5 @@
-python-telegram-bot==20.7
-telethon==1.36.0
-iqoptionapi
+python-telegram-bot[job-queue]
+telethon
+cryptg
+numpy
+https://github.com/iqoptionapi/iqoptionapi/archive/refs/heads/master.zip
