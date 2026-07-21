@@ -1,22 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-⚛️ QUANTUM IQ BOT — Multi-usuário (arquivo único)
-Configure as variáveis na seção CONFIG abaixo antes de rodar.
+⚛️ QUANTUM IQ BOT — Multi-usuário | Railway-ready
+Todas as configurações vêm de variáveis de ambiente (Railway Variables).
 """
-
-# ════════════════════════════════════════════
-#  ⚙️  CONFIG — preencha aqui
-# ════════════════════════════════════════════
-BOT_TOKEN      = "8233598336:AAHUtMg14-2hcOFObRhrBGsO4JIEyyA7gtI"
-ADMIN_ID       = 6058265294
-TG_API_ID      = 22453120
-TG_API_HASH    = "89826a4104518e9ed650cdb451ad8b53"
-TG_SESSION_STR = "1AZWarzQBu6K7sCuqn6BbtMWuH1g3aYs3PYT2Csv4uuXASN1k3L4dTY4VV3gx3Qn6Jb2hNQM8VZDp2jdjk0u3ci4tGrGEl8hVl_Z8BWp1NwFK1rU2rb4QTQnAQk3qIpg931QyiqW1m-PLpuCa6WJcrKGSNvtO6g7T_7nG1EzIRLyXHVl-46c1NDK_JqKzB2ym7kZcjScMRL2KkUgXoBbTjwv2dASbEHnSHNGM_thmun6WUQlMDnMmD5VFsDIR-GiP1FcFidKdFpm0cJvJqdt31l7jJWqCgd_E1efAm5mZVYak_wEYffHYYUtwPlgD0webWFn2tiH7bFX4D6BoUqy_S7ubdiPuIdw="
-CANAL_LINK     = "https://t.me/+_6C6EMQUg1syODdh"
-DB_PATH        = "quantum.db"
-SESSION        = "quantum_server"
-# ════════════════════════════════════════════
 
 import asyncio
 import logging
@@ -29,8 +16,23 @@ from datetime import datetime, timedelta
 # ════════════════════════════════════════════
 # 🇧🇷 HORÁRIO DE BRASÍLIA
 # ════════════════════════════════════════════
-os.environ['TZ'] = 'America/Sao_Paulo'
-time.tzset()
+os.environ.setdefault('TZ', 'America/Sao_Paulo')
+try:
+    time.tzset()
+except AttributeError:
+    pass  # Windows não tem tzset
+
+# ════════════════════════════════════════════
+#  ⚙️  CONFIG — lê das variáveis de ambiente
+# ════════════════════════════════════════════
+BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID       = int(os.environ.get("ADMIN_ID", "0"))
+TG_API_ID      = int(os.environ.get("TG_API_ID", "0"))
+TG_API_HASH    = os.environ.get("TG_API_HASH", "")
+TG_SESSION_STR = os.environ.get("TG_SESSION_STRING", "")
+CANAL_LINK     = os.environ.get("CANAL_LINK", "https://t.me/+_6C6EMQUg1syODdh")
+DB_PATH        = os.environ.get("DB_PATH", "quantum.db")
+SESSION        = "quantum_server"
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -255,45 +257,64 @@ class IQOperador:
         resultados = []
         tentativa  = 0
 
+        logger.info(f"[IQ] Operação: {ativo} {direcao.upper()} M{exp} R${valor} | conta={user.get('iq_conta')} email={user.get('iq_email')}")
+
         while tentativa <= max_gales:
             val = round(valor * (user["multiplicador"] ** tentativa), 2)
             try:
+                logger.info(f"[IQ] Tentativa {tentativa} — buy({val}, {ativo}, {direcao}, {exp})")
                 ok, id_op = self.api.buy(val, ativo, direcao, exp)
+                logger.info(f"[IQ] buy() retornou: ok={ok}, id={id_op}")
+
                 if not ok:
-                    resultados.append({"erro": "Ordem rejeitada"})
+                    logger.error(f"[IQ] Ordem rejeitada. id_op={id_op}")
+                    resultados.append({"erro": f"Ordem rejeitada: {id_op}"})
                     break
 
-                # Aguarda resultado da vela
+                # Aguarda a vela fechar antes de verificar resultado
+                logger.info(f"[IQ] Aguardando {exp * 60 + 5}s para fechar a vela...")
                 time.sleep(exp * 60 + 5)
-                
+
+                logger.info(f"[IQ] Verificando resultado da ordem {id_op}...")
                 try:
-                    status, lucro = self.api.check_win_v3(id_op)
-                except:
-                    resultados.append({"erro": "Erro ao verificar resultado"})
+                    resultado_raw = self.api.check_win_v3(id_op)
+                    logger.info(f"[IQ] check_win_v3 retornou: {resultado_raw}")
+
+                    if isinstance(resultado_raw, tuple):
+                        status, lucro = resultado_raw
+                        status = str(status).lower()
+                        lucro = float(lucro) if lucro else 0.0
+                    else:
+                        lucro = float(resultado_raw)
+                        status = "win" if lucro > 0 else ("loss" if lucro < 0 else "equal")
+                        lucro = abs(lucro)
+
+                except Exception as e:
+                    logger.error(f"[IQ] Erro ao verificar resultado: {e}")
+                    resultados.append({"erro": f"Erro ao verificar resultado: {e}"})
                     break
 
-                if isinstance(status, bool):
-                    status = "win" if status else "loss"
-                    lucro = float(lucro) if lucro else -val
-                
-                status = str(status).lower()
+                logger.info(f"[IQ] Resultado final: status={status}, lucro={lucro}")
 
                 if status == "win":
-                    salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "win", abs(float(lucro)))
-                    resultados.append({"status":"win","valor":val,"lucro":abs(float(lucro)),"gale":tentativa})
+                    salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "win", abs(lucro))
+                    resultados.append({"status": "win", "valor": val, "lucro": abs(lucro), "gale": tentativa})
                     break
-                elif status in ("loss","loose"):
+                elif status in ("loss", "loose"):
                     salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "loss", -val)
-                    resultados.append({"status":"loss","valor":val,"gale":tentativa})
+                    resultados.append({"status": "loss", "valor": val, "gale": tentativa})
                     tentativa += 1
                 elif status == "equal":
                     salvar_operacao(user["telegram_id"], ativo, direcao, exp, val, "equal", 0)
-                    resultados.append({"status":"equal","valor":val,"gale":tentativa})
+                    resultados.append({"status": "equal", "valor": val, "gale": tentativa})
                     break
                 else:
-                    resultados.append({"status":status,"valor":val,"gale":tentativa})
+                    logger.warning(f"[IQ] Status desconhecido: {status}")
+                    resultados.append({"status": status, "valor": val, "gale": tentativa})
                     break
+
             except Exception as e:
+                logger.error(f"[IQ] Exceção na operação: {e}", exc_info=True)
                 resultados.append({"erro": str(e)})
                 break
 
@@ -637,15 +658,6 @@ async def executar_para_usuario(uid, sinal, app):
             atualizar_config(uid, bot_ligado=0); return
 
         await _enviar_com_retry(app.bot, uid,
-            f"⚛️ *SINAL DETECTADO*\n{'─'*25}\n"
-            f"💰 Ativo    : `{sinal.get('ativo')}`\n"
-            f"📈 Direção  : *{sinal.get('direcao','').upper()}*\n"
-            f"⌛ Expiração: M{sinal.get('expiracao')}\n"
-            f"📊 Confiança: {sinal.get('confianca','?')}%\n"
-            f"🛡️ Score IA : {sinal.get('score','?')}/100", parse_mode="Markdown"
-        )
-
-        await _enviar_com_retry(app.bot, uid,
             f"🚀 *Iniciando operação...*\n"
             f"💹 Entrando em `{sinal.get('ativo')}` {sinal.get('direcao','').upper()} M{sinal.get('expiracao')}",
             parse_mode="Markdown"
@@ -684,8 +696,7 @@ async def executar_para_usuario(uid, sinal, app):
 
 
 async def rodar_listener(app):
-    session_str = TG_SESSION_STR or os.environ.get("TG_SESSION_STRING", "")
-    session = StringSession(session_str) if session_str else SESSION
+    session = StringSession(TG_SESSION_STR) if TG_SESSION_STR else SESSION
     async with TelegramClient(session, TG_API_ID, TG_API_HASH) as client:
         logger.info("✅ Telethon conectado!")
 
@@ -723,6 +734,7 @@ async def rodar_listener(app):
             uids = usuarios_bot_ligado()
             horario = sinal.get("horario", "")
 
+            # ── Notificação imediata de sinal recebido ──
             for uid in uids:
                 try:
                     direcao_emoji = "🟢 CALL" if sinal.get("direcao") == "call" else "🔴 PUT"
@@ -740,6 +752,7 @@ async def rodar_listener(app):
                 except Exception as e:
                     logger.warning(f"Aviso sinal para {uid}: {e}")
 
+            # ── Aguarda o horário de entrada ──
             if horario:
                 agora = datetime.now()
                 h, m  = map(int, horario.split(":"))
@@ -783,9 +796,9 @@ async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
 
 def main():
     if not BOT_TOKEN:
-        raise ValueError("Preencha BOT_TOKEN na seção CONFIG do script!")
+        raise ValueError("Variável BOT_TOKEN não definida!")
     if not TG_API_ID or not TG_API_HASH:
-        raise ValueError("Preencha TG_API_ID e TG_API_HASH na seção CONFIG!")
+        raise ValueError("Variáveis TG_API_ID e TG_API_HASH não definidas!")
 
     init_db()
     logger.info("✅ Banco iniciado.")
