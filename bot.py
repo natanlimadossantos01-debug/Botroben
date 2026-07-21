@@ -247,6 +247,38 @@ class IQOperador:
             if self.api: self.api.close()
         except: pass
 
+    def _checar_com_polling(self, id_op, exp_min, max_tentativas=10):
+        """Tenta checar o resultado com polling, aguardando a vela fechar."""
+        # Aguarda a vela fechar (expiração + 3s de margem)
+        time.sleep(exp_min * 60 + 3)
+        for tentativa in range(max_tentativas):
+            try:
+                resultado_raw = self.api.check_win_v3(id_op)
+                logger.info(f"[IQ] check_win_v3 ({tentativa+1}ª tentativa): {resultado_raw}")
+
+                # Resultado ainda não disponível (None, False ou similar)
+                if resultado_raw is None or resultado_raw is False:
+                    logger.info(f"[IQ] Resultado ainda não disponível, aguardando 5s...")
+                    time.sleep(5)
+                    continue
+
+                if isinstance(resultado_raw, tuple):
+                    status, lucro = resultado_raw
+                    status = str(status).lower()
+                    lucro = float(lucro) if lucro else 0.0
+                else:
+                    lucro = float(resultado_raw)
+                    status = "win" if lucro > 0 else ("loss" if lucro < 0 else "equal")
+                    lucro = abs(lucro)
+
+                return status, lucro
+
+            except Exception as e:
+                logger.error(f"[IQ] Erro ao verificar resultado (tentativa {tentativa+1}): {e}")
+                time.sleep(5)
+
+        return "erro", 0.0
+
     def operar(self, sinal):
         user      = self.user
         ativo     = sinal["ativo"]
@@ -271,28 +303,8 @@ class IQOperador:
                     resultados.append({"erro": f"Ordem rejeitada: {id_op}"})
                     break
 
-                # Aguarda a vela fechar antes de verificar resultado
-                logger.info(f"[IQ] Aguardando {exp * 60 + 5}s para fechar a vela...")
-                time.sleep(exp * 60 + 5)
-
-                logger.info(f"[IQ] Verificando resultado da ordem {id_op}...")
-                try:
-                    resultado_raw = self.api.check_win_v3(id_op)
-                    logger.info(f"[IQ] check_win_v3 retornou: {resultado_raw}")
-
-                    if isinstance(resultado_raw, tuple):
-                        status, lucro = resultado_raw
-                        status = str(status).lower()
-                        lucro = float(lucro) if lucro else 0.0
-                    else:
-                        lucro = float(resultado_raw)
-                        status = "win" if lucro > 0 else ("loss" if lucro < 0 else "equal")
-                        lucro = abs(lucro)
-
-                except Exception as e:
-                    logger.error(f"[IQ] Erro ao verificar resultado: {e}")
-                    resultados.append({"erro": f"Erro ao verificar resultado: {e}"})
-                    break
+                # Aguarda vela fechar com polling (não trava o bot — roda em thread separada)
+                status, lucro = self._checar_com_polling(id_op, exp)
 
                 logger.info(f"[IQ] Resultado final: status={status}, lucro={lucro}")
 
@@ -309,7 +321,7 @@ class IQOperador:
                     resultados.append({"status": "equal", "valor": val, "gale": tentativa})
                     break
                 else:
-                    logger.warning(f"[IQ] Status desconhecido: {status}")
+                    logger.warning(f"[IQ] Status desconhecido ou erro: {status}")
                     resultados.append({"status": status, "valor": val, "gale": tentativa})
                     break
 
