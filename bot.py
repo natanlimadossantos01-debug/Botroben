@@ -3,7 +3,7 @@
 ⚛️ QUANTUM IA - Backend COMPLETO
 ☁️ Railway Ready
 ✅ API + Sinais + IQ Option + PAINEL ADMIN
-🔑 Sistema por EMAIL (sem licenças)
+🔑 Admin: natanbinario810@gmail.com
 """
 
 import asyncio
@@ -27,13 +27,11 @@ time.tzset()
 # ═══════════════════════════════════════════
 # CONFIGURAÇÕES VIA AMBIENTE (SEGURO!)
 # ═══════════════════════════════════════════
-SENHA_APP = os.environ.get('SENHA_APP', '102030')
 SENHA_ADMIN = os.environ.get('SENHA_ADMIN', 'admin123')
 DB_PATH = "quantum.db"
 TELEGRAM_API_ID = int(os.environ.get('TG_API_ID', '0'))
 TELEGRAM_API_HASH = os.environ.get('TG_API_HASH', '')
 CANAL_LINK = os.environ.get('CANAL_LINK', 'https://t.me/+_6C6EMQUg1syODdh')
-ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -88,8 +86,9 @@ def init_db():
         );
     """)
     conn.execute("INSERT OR IGNORE INTO config (id) VALUES (1)")
+    # Admin: natanbinario810@gmail.com
     conn.execute("INSERT OR IGNORE INTO usuarios (email, senha, nome, ativo, admin, expiracao, criado_em) VALUES (?,?,?,1,1,?,?)",
-                 ('admin@quantum.com', SENHA_ADMIN, 'Administrador', '2099-12-31 23:59:59', datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+                 ('natanbinario810@gmail.com', SENHA_ADMIN, 'Natan', '2099-12-31 23:59:59', datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
     conn.close()
 
@@ -97,13 +96,13 @@ def init_db():
 # FUNÇÕES DE USUÁRIO
 # ═══════════════════════════════════════════
 
-def criar_usuario(email, senha, nome, dias=3):
+def criar_usuario(email, nome, dias=3):
     exp = (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d %H:%M:%S")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(DB_PATH)
     try:
         conn.execute("INSERT INTO usuarios (email, senha, nome, ativo, expiracao, criado_em) VALUES (?,?,?,1,?,?)",
-                     (email, senha, nome, exp, now))
+                     (email, '123456', nome, exp, now))
         conn.commit()
         conn.close()
         return True, "Usuário criado!"
@@ -472,10 +471,6 @@ def historico():
     conn.close()
     return jsonify(rows)
 
-# ═══════════════════════════════════════════
-# ENDPOINTS ADMIN
-# ═══════════════════════════════════════════
-
 @app.route('/api/admin/usuarios', methods=['GET'])
 def admin_usuarios():
     return jsonify(listar_usuarios())
@@ -485,10 +480,8 @@ def admin_ativar():
     data = request.json
     email = data.get('email', '')
     dias = data.get('dias', 30)
-    if not email:
-        return jsonify({"status": "erro", "msg": "Email obrigatório"}), 400
+    if not email: return jsonify({"status": "erro", "msg": "Email obrigatório"}), 400
     
-    # Verifica se usuário existe, senão cria
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT * FROM usuarios WHERE email=?", (email,))
@@ -497,29 +490,25 @@ def admin_ativar():
     if row:
         ativar_usuario(email, dias)
     else:
-        criar_usuario(email, '123456', email.split('@')[0], dias)
+        nome = email.split('@')[0]
+        criar_usuario(email, nome, dias)
     
     conn.close()
-    add_log("INFO", f"👤 Usuário {email} ativado por {dias} dias")
+    add_log("INFO", f"👤 {email} ativado por {dias} dias")
     return jsonify({"status": "ok", "msg": f"{email} ativado por {dias} dias!"})
 
 @app.route('/api/admin/desativar', methods=['POST'])
 def admin_desativar():
     data = request.json
     email = data.get('email', '')
-    if not email:
-        return jsonify({"status": "erro", "msg": "Email obrigatório"}), 400
+    if not email: return jsonify({"status": "erro"}), 400
     desativar_usuario(email)
-    add_log("INFO", f"🚫 Usuário {email} desativado")
-    return jsonify({"status": "ok", "msg": f"{email} desativado!"})
-
-# ═══════════════════════════════════════════
-# INICIAR
-# ═══════════════════════════════════════════
+    add_log("INFO", f"🚫 {email} desativado")
+    return jsonify({"status": "ok"})
 
 if __name__ == "__main__":
     init_db()
     add_log("INFO", "🚀 Sistema iniciado")
     threading.Thread(target=run_listener, daemon=True).start()
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=5000)
