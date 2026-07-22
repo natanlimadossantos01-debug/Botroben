@@ -3,6 +3,7 @@
 ⚛️ QUANTUM IA - Backend COMPLETO
 ☁️ Railway Ready
 ✅ API + Sinais + IQ Option + LICENÇAS
+🔒 Variáveis de Ambiente (SEGURO!)
 """
 
 import asyncio
@@ -11,6 +12,8 @@ import logging
 import os
 import re
 import sqlite3
+import random
+import string
 import threading
 import time
 from datetime import datetime, timedelta
@@ -18,18 +21,20 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 # ═══════════════════════════════════════════
-# CONFIGURAÇÕES
+# 🇧🇷 HORÁRIO DE BRASÍLIA
 # ═══════════════════════════════════════════
 os.environ['TZ'] = 'America/Sao_Paulo'
 time.tzset()
 
-SENHA_APP = "102030"
+# ═══════════════════════════════════════════
+# CONFIGURAÇÕES VIA AMBIENTE (SEGURO!)
+# ═══════════════════════════════════════════
+SENHA_APP = os.environ.get('SENHA_APP', '102030')
 DB_PATH = "quantum.db"
-ADMIN_ID = 6058265294  # Seu ID do Telegram
-
-TELEGRAM_API_ID = int(os.environ.get('TG_API_ID', '22453120'))
-TELEGRAM_API_HASH = os.environ.get('TG_API_HASH', '89826a4104518e9ed650cdb451ad8b53'))
-CANAL_LINK = os.environ.get('CANAL_LINK', 'https://t.me/+_6C6EMQUg1syODdh')
+TELEGRAM_API_ID = int(os.environ.get('TG_API_ID', '0'))
+TELEGRAM_API_HASH = os.environ.get('TG_API_HASH', '')
+CANAL_LINK = os.environ.get('CANAL_LINK', '')
+ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,7 +98,6 @@ def init_db():
 # ═══════════════════════════════════════════
 
 def gerar_chave():
-    import random, string
     return 'QT-' + ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
 
 def criar_licenca(telegram_id, username, nome, dias=30):
@@ -151,7 +155,7 @@ def revogar_licenca(chave):
     conn.close()
 
 # ═══════════════════════════════════════════
-# FUNÇÕES DO BOT
+# FUNÇÕES AUXILIARES
 # ═══════════════════════════════════════════
 
 def get_config():
@@ -177,6 +181,7 @@ def add_log(tipo, msg):
                  (datetime.now().strftime("%H:%M:%S"), tipo, msg))
     conn.commit()
     conn.close()
+    logger.info(f"[{tipo}] {msg}")
 
 def get_logs(limit=50):
     conn = sqlite3.connect(DB_PATH)
@@ -239,6 +244,7 @@ class IQOperador:
         from iqoptionapi.stable_api import IQ_Option
         cfg = get_config()
         if not cfg.get('iq_email') or not cfg.get('iq_senha'):
+            add_log("ERRO", "Configure email/senha primeiro!")
             return False
         try:
             self.api = IQ_Option(cfg['iq_email'], cfg['iq_senha'])
@@ -249,8 +255,11 @@ class IQOperador:
                 update_config(conectado=1, saldo=saldo)
                 add_log("OK", f"✅ Conectado! Saldo: R$ {saldo:.2f}")
                 return True
-            return False
-        except:
+            else:
+                add_log("ERRO", "Falha na conexão IQ Option")
+                return False
+        except Exception as e:
+            add_log("ERRO", f"Erro: {str(e)[:50]}")
             return False
 
     def operar(self, sinal):
@@ -279,7 +288,10 @@ class IQOperador:
             try:
                 saldo_antes = self.api.get_balance()
                 ok, id_op = self.api.buy(val, ativo, direcao, exp)
-                if not ok: break
+                if not ok:
+                    add_log("ERRO", f"Ordem rejeitada: {ativo}")
+                    break
+                
                 time.sleep(exp * 60 + 5)
                 saldo_depois = self.api.get_balance()
                 lucro = saldo_depois - saldo_antes
@@ -298,7 +310,7 @@ class IQOperador:
                     add_log("INFO", f"〰️ Empate {ativo}")
                     break
             except Exception as e:
-                add_log("ERRO", f"Erro: {str(e)[:50]}")
+                add_log("ERRO", f"Erro op: {str(e)[:50]}")
                 break
         
         try:
@@ -307,34 +319,40 @@ class IQOperador:
             pass
 
 # ═══════════════════════════════════════════
-# LISTENER DE SINAIS
+# LISTENER DE SINAIS (TELETHON)
 # ═══════════════════════════════════════════
 
 def run_listener():
     async def _run():
         from telethon import TelegramClient, events
+        from telethon.sessions import StringSession
         from telethon.tl.functions.messages import ImportChatInviteRequest
         from telethon.tl.types import Channel, Chat
         
+        session_str = os.environ.get('TG_SESSION_STRING', '')
+        session = StringSession(session_str) if session_str else "quantum_session"
+        
         add_log("INFO", "🔄 Conectando Telegram...")
         
-        async with TelegramClient("quantum_session", TELEGRAM_API_ID, TELEGRAM_API_HASH) as client:
+        async with TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH) as client:
             add_log("INFO", "✅ Telegram conectado!")
             
             entity = None
-            invite = CANAL_LINK.strip("/").split("+")[-1]
+            invite = CANAL_LINK.strip("/").split("+")[-1] if CANAL_LINK else ""
             
-            try:
-                result = await client(ImportChatInviteRequest(invite))
-                entity = result.chats[0]
-            except:
-                async for d in client.iter_dialogs():
-                    if isinstance(d.entity, (Channel, Chat)):
-                        entity = d.entity
-                        break
+            if invite:
+                try:
+                    result = await client(ImportChatInviteRequest(invite))
+                    entity = result.chats[0]
+                except Exception as e:
+                    if "already" in str(e).lower():
+                        async for d in client.iter_dialogs():
+                            if isinstance(d.entity, (Channel, Chat)):
+                                entity = d.entity
+                                break
 
             if not entity:
-                add_log("ERRO", "Canal não encontrado!")
+                add_log("ERRO", "Canal não encontrado! Verifique CANAL_LINK")
                 return
 
             add_log("INFO", f"👀 Escutando: {getattr(entity, 'title', 'canal')}")
@@ -380,6 +398,10 @@ def run_listener():
 
 app = Flask(__name__)
 CORS(app)
+
+@app.route('/')
+def home():
+    return jsonify({"status": "online", "app": "Quantum IA", "versao": "2.0"})
 
 @app.route('/api/login', methods=['POST'])
 def login():
@@ -429,7 +451,7 @@ def ativar_licenca():
     if valido:
         update_config(licenca_ativa=chave)
         add_log("INFO", f"🔑 Licença ativada: {chave[:8]}...")
-        return jsonify({"status": "ok", "msg": "Licença ativada!", "info": info})
+        return jsonify({"status": "ok", "msg": "Licença ativada!"})
     else:
         return jsonify({"status": "erro", "msg": info}), 400
 
@@ -444,7 +466,7 @@ def info_licenca():
     if valido:
         exp = datetime.strptime(info['expiracao'], "%Y-%m-%d %H:%M:%S")
         dias = (exp - datetime.now()).days
-        return jsonify({"ativo": True, "dias": dias, "chave": chave[:8]+"...", "nome": info.get('nome', '')})
+        return jsonify({"ativo": True, "dias": max(dias, 0), "chave": chave[:8]+"...", "nome": info.get('nome', '')})
     else:
         update_config(licenca_ativa='')
         return jsonify({"ativo": False, "msg": info})
@@ -458,6 +480,9 @@ def ligar():
     valido, _ = validar_licenca(cfg['licenca_ativa'])
     if not valido:
         return jsonify({"status": "erro", "msg": "Licença expirada!"}), 400
+    
+    if not cfg.get('iq_email'):
+        return jsonify({"status": "erro", "msg": "Configure a IQ Option primeiro!"}), 400
     
     update_config(bot_ligado=1)
     add_log("INFO", "▶️ Bot ligado")
@@ -481,10 +506,6 @@ def historico():
     rows = [{"data": r[0], "ativo": r[1], "direcao": r[2], "expiracao": r[3], "valor": r[4], "resultado": r[5], "lucro": r[6]} for r in c.fetchall()]
     conn.close()
     return jsonify(rows)
-
-# ═══════════════════════════════════════════
-# ENDPOINTS ADMIN
-# ═══════════════════════════════════════════
 
 @app.route('/api/admin/licencas', methods=['GET'])
 def admin_licencas():
