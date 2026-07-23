@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
 ⚛️ QUANTUM IA - Backend COMPLETO
-☁️ Railway Ready
-✅ API + Sinais + IQ Option + PAINEL ADMIN
-🔑 Admin: natanbinario810@gmail.com
+✅ Canal fixo: https://t.me/+_6C6EMQUg1syODdh
+✅ Railway Ready
 """
 
 import asyncio
@@ -25,13 +24,17 @@ os.environ['TZ'] = 'America/Sao_Paulo'
 time.tzset()
 
 # ═══════════════════════════════════════════
-# CONFIGURAÇÕES VIA AMBIENTE (SEGURO!)
+# CONFIGURAÇÕES (VARIÁVEIS DE AMBIENTE)
 # ═══════════════════════════════════════════
 SENHA_ADMIN = os.environ.get('SENHA_ADMIN', 'admin123')
 DB_PATH = "quantum.db"
-TELEGRAM_API_ID = int(os.environ.get('TG_API_ID', '0'))
-TELEGRAM_API_HASH = os.environ.get('TG_API_HASH', '')
-CANAL_LINK = os.environ.get('CANAL_LINK', 'https://t.me/+_6C6EMQUg1syODdh')
+TELEGRAM_API_ID = int(os.environ.get('TG_API_ID', '22453120'))
+TELEGRAM_API_HASH = os.environ.get('TG_API_HASH', '89826a4104518e9ed650cdb451ad8b53')
+
+# ═══════════════════════════════════════════
+# 🎯 CANAL FIXO (NÃO USA VARIÁVEL)
+# ═══════════════════════════════════════════
+CANAL_LINK = "https://t.me/+_6C6EMQUg1syODdh"
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -86,7 +89,7 @@ def init_db():
         );
     """)
     conn.execute("INSERT OR IGNORE INTO config (id) VALUES (1)")
-    # Admin: natanbinario810@gmail.com
+    # Admin principal
     conn.execute("INSERT OR IGNORE INTO usuarios (email, senha, nome, ativo, admin, expiracao, criado_em) VALUES (?,?,?,1,1,?,?)",
                  ('natanbinario810@gmail.com', SENHA_ADMIN, 'Natan', '2099-12-31 23:59:59', datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
@@ -333,21 +336,27 @@ def run_listener():
             add_log("INFO", "✅ Telegram conectado!")
             
             entity = None
-            invite = CANAL_LINK.strip("/").split("+")[-1] if CANAL_LINK else ""
+            invite = CANAL_LINK.strip("/").split("+")[-1]
             
-            if invite:
-                try:
-                    result = await client(ImportChatInviteRequest(invite))
-                    entity = result.chats[0]
-                except Exception as e:
-                    if "already" in str(e).lower():
+            try:
+                result = await client(ImportChatInviteRequest(invite))
+                entity = result.chats[0]
+            except Exception as e:
+                if "already" in str(e).lower():
+                    # Procura especificamente pelo canal correto
+                    async for d in client.iter_dialogs():
+                        t = getattr(d.entity, 'title', '') or ''
+                        if 'quantum' in t.lower() or 'ia' in t.lower() or 'sinais' in t.lower():
+                            entity = d.entity
+                            break
+                    if not entity:
                         async for d in client.iter_dialogs():
                             if isinstance(d.entity, (Channel, Chat)):
                                 entity = d.entity
                                 break
 
             if not entity:
-                add_log("ERRO", "Canal não encontrado!")
+                add_log("ERRO", "Canal não encontrado! Verifique o link.")
                 return
 
             add_log("INFO", f"👀 Escutando: {getattr(entity, 'title', 'canal')}")
@@ -390,29 +399,6 @@ CORS(app)
 @app.route('/')
 def home():
     return jsonify({"status": "online", "app": "Quantum IA", "versao": "3.0"})
-
-@app.route('/api/login', methods=['POST'])
-def login():
-    data = request.json
-    email = data.get('email', '')
-    senha = data.get('senha', '')
-    
-    if not email or not senha:
-        return jsonify({"status": "erro", "msg": "Email e senha obrigatórios"}), 400
-    
-    valido, info = validar_usuario(email, senha)
-    if valido:
-        return jsonify({
-            "status": "ok", 
-            "token": "quantum_token",
-            "user": {
-                "email": info['email'],
-                "nome": info['nome'],
-                "admin": bool(info['admin']),
-                "expiracao": info['expiracao']
-            }
-        })
-    return jsonify({"status": "erro", "msg": info}), 401
 
 @app.route('/api/status', methods=['GET'])
 def status():
@@ -506,9 +492,13 @@ def admin_desativar():
     add_log("INFO", f"🚫 {email} desativado")
     return jsonify({"status": "ok"})
 
+# ═══════════════════════════════════════════
+# INICIAR
+# ═══════════════════════════════════════════
+
 if __name__ == "__main__":
     init_db()
     add_log("INFO", "🚀 Sistema iniciado")
     threading.Thread(target=run_listener, daemon=True).start()
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=port)
