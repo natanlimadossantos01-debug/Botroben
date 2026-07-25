@@ -4,6 +4,7 @@
 ⚛️ Trader Professor Automático
 👥 Multi-usuário com Painel Admin
 👑 Admin gerencia acessos via Telegram
+✅ Datas corrigidas - Fuso Brasil
 """
 
 import asyncio
@@ -40,7 +41,7 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logg
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════
-# BANCO DE DADOS
+# BANCO DE DADOS (CORRIGIDO)
 # ═══════════════════════════════════════════
 
 def init_db():
@@ -77,7 +78,11 @@ def init_db():
             lucro REAL
         );
     """)
-    conn.execute("INSERT OR IGNORE INTO users (user_id, ativo, expiracao, cadastro) VALUES (?, 1, '2099-12-31', datetime('now','localtime'))", (ADMIN_ID,))
+    # Admin nunca expira
+    admin_exp = (datetime.now(FUSO_BR) + timedelta(days=36500)).strftime("%Y-%m-%d %H:%M:%S")
+    admin_now = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("INSERT OR IGNORE INTO users (user_id, ativo, expiracao, cadastro) VALUES (?, 1, ?, ?)", 
+                 (ADMIN_ID, admin_exp, admin_now))
     conn.commit()
     conn.close()
 
@@ -91,13 +96,17 @@ def get_user(user_id):
     return dict(zip(cols, row)) if row else None
 
 def criar_usuario(user_id, username, first_name):
-    exp = (datetime.now(FUSO_BR) + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
-    now = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
+    """Cria usuário com 3 dias de trial"""
+    exp = datetime.now(FUSO_BR) + timedelta(days=3)
+    exp_str = exp.strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
+    
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""INSERT OR IGNORE INTO users (user_id, username, first_name, ativo, trial_usado, expiracao, cadastro) 
-                    VALUES (?,?,?,1,1,?,?)""", (user_id, username or "", first_name or "", exp, now))
+                    VALUES (?,?,?,1,1,?,?)""", (user_id, username or "", first_name or "", exp_str, now_str))
     conn.commit()
     conn.close()
+    logger.info(f"✅ Novo usuário: {user_id} - Trial até {exp_str}")
 
 def atualizar_user(user_id, **kwargs):
     conn = sqlite3.connect(DB_PATH)
@@ -108,28 +117,55 @@ def atualizar_user(user_id, **kwargs):
     conn.close()
 
 def ativar_user(user_id, dias=30):
-    exp = (datetime.now(FUSO_BR) + timedelta(days=dias)).strftime("%Y-%m-%d %H:%M:%S")
+    """Ativa usuário por X dias a partir de AGORA"""
+    exp = datetime.now(FUSO_BR) + timedelta(days=dias)
+    exp_str = exp.strftime("%Y-%m-%d %H:%M:%S")
+    
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET ativo=1, expiracao=? WHERE user_id=?", (exp, user_id))
+    conn.execute("UPDATE users SET ativo=1, expiracao=? WHERE user_id=?", (exp_str, user_id))
     conn.commit()
     conn.close()
+    logger.info(f"✅ Usuário {user_id} ativado até {exp_str}")
 
 def desativar_user(user_id):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET ativo=0, bot_ligado=0 WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
+    logger.info(f"🚫 Usuário {user_id} desativado")
 
 def user_ativo(user_id):
+    """Verifica se usuário está ativo e não expirado"""
+    # Admin nunca expira
+    if user_id == ADMIN_ID:
+        return True
+    
     u = get_user(user_id)
-    if not u or not u['ativo']: return False
+    if not u or not u.get('ativo'):
+        return False
+    
     try:
-        exp = datetime.strptime(u['expiracao'], "%Y-%m-%d %H:%M:%S")
-        if datetime.now(FUSO_BR) > exp:
+        exp_str = u.get('expiracao', '')
+        if not exp_str:
+            return False
+        
+        # Converte string para datetime
+        exp = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
+        agora = datetime.now(FUSO_BR)
+        
+        if agora > exp:
+            logger.info(f"⏰ Usuário {user_id} expirado. Exp: {exp_str} | Agora: {agora}")
             desativar_user(user_id)
             return False
-    except: return False
-    return True
+        
+        # Calcula dias restantes
+        dias = (exp - agora).days
+        logger.info(f"✅ Usuário {user_id} ativo. {dias} dias restantes")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Erro ao verificar expiração {user_id}: {e}")
+        return False
 
 def listar_users():
     conn = sqlite3.connect(DB_PATH)
@@ -192,10 +228,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
     else:
-        try:
-            d = (datetime.strptime(user.get('expiracao', ''), "%Y-%m-%d %H:%M:%S") - datetime.now(FUSO_BR)).days
-            s = f"✅ {d} dias" if user['ativo'] else "⛔ Expirado"
-        except: s = "⛔ Expirado"
+        if user_ativo(user_id):
+            try:
+                exp = datetime.strptime(user.get('expiracao', ''), "%Y-%m-%d %H:%M:%S")
+                dias = (exp - datetime.now(FUSO_BR)).days
+                s = f"✅ {dias} dias restantes"
+            except: 
+                s = "✅ Ativo"
+        else:
+            s = "⛔ Expirado"
         
         await update.message.reply_text(
             f"👋 *{nome}*\n📊 Plano: {s}\n🤖 Bot: {'🟢' if user.get('bot_ligado') else '🔴'}\n💰 Saldo: R$ {user.get('saldo', 0):.2f}\n\n/status para detalhes",
@@ -205,7 +246,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user = get_user(user_id)
-    if not user: await update.message.reply_text("❌ Use /start primeiro"); return
+    if not user: 
+        await update.message.reply_text("❌ Use /start primeiro"); return
+    
+    if not user_ativo(user_id):
+        await update.message.reply_text("⛔ Seu acesso expirou!\nContate: @natanbinario"); return
     
     res = resultado_dia(user_id)
     taxa = (res['wins']/res['total']*100) if res['total'] > 0 else 0
@@ -228,9 +273,9 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_ligar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not user_ativo(user_id): 
-        await update.message.reply_text("⛔ Acesso expirado! Contate o administrador: @natanbinario")
-        return
+    
+    if not user_ativo(user_id):
+        await update.message.reply_text("⛔ Acesso expirado! Contate: @natanbinario"); return
     
     user = get_user(user_id)
     if not user or not user.get('iq_email'): 
@@ -242,7 +287,7 @@ async def cmd_ligar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"💰 Saldo: R$ {user.get('saldo', 0):.2f}\n"
         f"🤖 Auto operação ativada\n"
         f"📊 3/5 estratégias = Entra\n\n"
-        f"Use /parar para desligar\n/status para resultados",
+        f"/parar - Desligar\n/status - Resultados",
         parse_mode="Markdown"
     )
 
@@ -258,23 +303,23 @@ async def cmd_parar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_ajuda(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "📚 *COMANDOS*\n\n"
-        "/start - Iniciar\n"
+        "/start - Iniciar (3 dias grátis)\n"
         "/configurar - Setup IQ Option\n"
-        "/ligar - Ligar bot\n"
+        "/ligar - Ligar bot automático\n"
         "/parar - Parar bot\n"
-        "/status - Ver status\n"
-        "/ajuda - Esta mensagem",
+        "/status - Ver resultados\n"
+        "/ajuda - Esta mensagem\n\n"
+        "💳 Para adquirir acesso: @natanbinario",
         parse_mode="Markdown"
     )
 
 # ═══════════════════════════════════════════
-# CONFIGURAÇÃO (CONVERSATION HANDLER)
+# CONFIGURAÇÃO
 # ═══════════════════════════════════════════
 
 async def cmd_configurar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not user_ativo(update.effective_user.id):
-        await update.message.reply_text("⛔ Acesso expirado! Contate: @natanbinario")
-        return ConversationHandler.END
+        await update.message.reply_text("⛔ Acesso expirado! Contate: @natanbinario"); return ConversationHandler.END
     await update.message.reply_text("⚙️ *Configuração IQ Option*\n\n📧 Digite seu email:", parse_mode="Markdown")
     return CONF_EMAIL
 
@@ -355,76 +400,80 @@ async def conf_cancelar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
-        await update.message.reply_text("⛔ Acesso negado!")
-        return
+        await update.message.reply_text("⛔ Acesso negado!"); return
     
     users = listar_users()
-    texto = f"👑 *PAINEL ADMIN*\n\n📊 Total: {len(users)} usuários\n\n"
+    total = len(users)
+    ativos = sum(1 for u in users if u['ativo'])
     
-    for u in users[:15]:
+    texto = f"👑 *PAINEL ADMIN*\n\n📊 Total: {total} | 🟢 Ativos: {ativos}\n\n"
+    
+    for u in users[:10]:
         s = "🟢" if u['ativo'] else "🔴"
         b = "🤖" if u['bot'] else "💤"
         exp = (u['exp'] or '')[:10]
         texto += f"{s}{b} `{u['id']}` - {u['nome']}\n   📧 {u.get('email','?')} | Exp: {exp}\n\n"
     
-    if len(users) > 15:
-        texto += f"... e mais {len(users)-15} usuários\n\n"
-    
-    texto += "*Ações:*\n/ativar ID DIAS\n/desativar ID\n/listar - Ver todos"
+    texto += "*Comandos admin:*\n/ativar ID DIAS\n/desativar ID\n/listar"
     
     await update.message.reply_text(texto, parse_mode="Markdown")
 
 async def cmd_ativar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID: await update.message.reply_text("⛔ Acesso negado!"); return
+    if user_id != ADMIN_ID: 
+        await update.message.reply_text("⛔ Acesso negado!"); return
     
-    if not ctx.args: await update.message.reply_text("Uso: /ativar <user_id> <dias>\nEx: /ativar 123456789 30"); return
+    if not ctx.args: 
+        await update.message.reply_text("Uso: /ativar <user_id> <dias>\nEx: /ativar 123456789 30"); return
     
     try:
         target = int(ctx.args[0])
         dias = int(ctx.args[1]) if len(ctx.args) > 1 else 30
         ativar_user(target, dias)
+        
         await update.message.reply_text(f"✅ Usuário `{target}` ativado por {dias} dias!", parse_mode="Markdown")
-        try: await ctx.bot.send_message(target, f"🎉 Sua licença foi ativada por {dias} dias!\nUse /ligar para começar!")
-        except: pass
-    except: await update.message.reply_text("❌ Erro! Use: /ativar <user_id> <dias>")
+        
+        try: 
+            await ctx.bot.send_message(target, f"🎉 Sua licença foi ativada por {dias} dias!\nUse /ligar para começar!")
+        except: 
+            await update.message.reply_text("⚠️ Não foi possível avisar o usuário.")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ Erro: {e}\nUse: /ativar <user_id> <dias>")
 
 async def cmd_desativar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID: await update.message.reply_text("⛔ Acesso negado!"); return
+    if user_id != ADMIN_ID: 
+        await update.message.reply_text("⛔ Acesso negado!"); return
     
-    if not ctx.args: await update.message.reply_text("Uso: /desativar <user_id>"); return
+    if not ctx.args: 
+        await update.message.reply_text("Uso: /desativar <user_id>"); return
     
     try:
         target = int(ctx.args[0])
         desativar_user(target)
         await update.message.reply_text(f"✅ Usuário `{target}` desativado!", parse_mode="Markdown")
-    except: await update.message.reply_text("❌ Erro! Use: /desativar <user_id>")
+    except: 
+        await update.message.reply_text("❌ Erro! Use: /desativar <user_id>")
 
 async def cmd_listar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id != ADMIN_ID: await update.message.reply_text("⛔ Acesso negado!"); return
+    if user_id != ADMIN_ID: 
+        await update.message.reply_text("⛔ Acesso negado!"); return
     
     users = listar_users()
-    texto = f"👥 *TODOS USUÁRIOS* ({len(users)})\n\n"
+    if not users:
+        await update.message.reply_text("Nenhum usuário cadastrado.")
+        return
     
-    for u in users:
+    texto = f"👥 *USUÁRIOS ({len(users)})*\n\n"
+    for u in users[:30]:
         s = "🟢" if u['ativo'] else "🔴"
         b = "🤖" if u['bot'] else "💤"
         exp = (u['exp'] or '')[:10]
         texto += f"{s}{b} `{u['id']}` {u['nome']}\n   📧 {u.get('email','?')} | {exp}\n\n"
     
-    # Divide em partes se muito grande
-    if len(texto) > 4000:
-        for i in range(0, len(users), 20):
-            parte = f"👥 *USUÁRIOS ({i+1}-{min(i+20, len(users))})*\n\n"
-            for u in users[i:i+20]:
-                s = "🟢" if u['ativo'] else "🔴"
-                exp = (u['exp'] or '')[:10]
-                parte += f"{s} `{u['id']}` {u['nome']} | {exp}\n"
-            await update.message.reply_text(parte, parse_mode="Markdown")
-    else:
-        await update.message.reply_text(texto, parse_mode="Markdown")
+    await update.message.reply_text(texto, parse_mode="Markdown")
 
 # ═══════════════════════════════════════════
 # MAIN
@@ -452,7 +501,6 @@ def main():
         fallbacks=[CommandHandler("cancelar", conf_cancelar)],
     )
     
-    # Handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("ligar", cmd_ligar))
@@ -467,7 +515,7 @@ def main():
     logger.info("🚀 Bot iniciado!")
     print(f"\n🤖 Bot Telegram pronto!")
     print(f"👑 Admin ID: {ADMIN_ID}")
-    print(f"📝 Comandos: /start /configurar /ligar /parar /status /admin\n")
+    print(f"📝 /start /configurar /ligar /parar /status /admin\n")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
