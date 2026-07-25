@@ -3,7 +3,8 @@
 🤖 QUANTUM IA - Bot Telegram Multi-Usuário COMPLETO
 ⚛️ Trader Professor com Motor de Trading Automático
 👥 Cada usuário opera independente
-✅ Tudo funcionando: Config, Painel Admin, Trading Real
+✅ TUDO FUNCIONANDO: Config, Painel Admin, Trading Real
+🔧 Datas corrigidas - Verificação de usuário ativo
 """
 
 import asyncio
@@ -43,7 +44,7 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logg
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════
-# BANCO DE DADOS
+# BANCO DE DADOS (CORRIGIDO)
 # ═══════════════════════════════════════════
 
 def init_db():
@@ -98,14 +99,19 @@ def get_user(user_id):
     return dict(zip(cols, row)) if row else None
 
 def criar_usuario(user_id, username, first_name):
+    """Cria usuário com 3 dias de trial"""
     exp = datetime.now(FUSO_BR) + timedelta(days=3)
     exp_str = exp.strftime("%Y-%m-%d %H:%M:%S")
     now_str = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
+    
     conn = sqlite3.connect(DB_PATH)
     conn.execute("""INSERT OR IGNORE INTO users (user_id, username, first_name, ativo, trial_usado, expiracao, cadastro) 
                     VALUES (?,?,?,1,1,?,?)""", (user_id, username or "", first_name or "", exp_str, now_str))
     conn.commit()
     conn.close()
+    
+    u = get_user(user_id)
+    logger.info(f"✅ criar_usuario({user_id}): Trial até {exp_str} | DB ativo={u.get('ativo')} | DB exp={u.get('expiracao')}")
 
 def atualizar_user(user_id, **kwargs):
     conn = sqlite3.connect(DB_PATH)
@@ -116,32 +122,73 @@ def atualizar_user(user_id, **kwargs):
     conn.close()
 
 def ativar_user(user_id, dias=30):
+    """Ativa usuário por X dias"""
     exp = datetime.now(FUSO_BR) + timedelta(days=dias)
     exp_str = exp.strftime("%Y-%m-%d %H:%M:%S")
+    
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET ativo=1, expiracao=? WHERE user_id=?", (exp_str, user_id))
     conn.commit()
     conn.close()
+    
+    u = get_user(user_id)
+    logger.info(f"✅ ativar_user({user_id}): Dias={dias} | Exp={exp_str} | DB={u.get('expiracao') if u else 'ERRO'}")
 
 def desativar_user(user_id):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET ativo=0, bot_ligado=0 WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
+    logger.info(f"🚫 desativar_user({user_id})")
 
 def user_ativo(user_id):
-    if user_id == ADMIN_ID: return True
+    """Verifica se usuário está ativo e não expirado"""
+    if user_id == ADMIN_ID:
+        return True
+    
     u = get_user(user_id)
-    if not u or not u.get('ativo'): return False
+    if not u:
+        logger.info(f"❌ user_ativo({user_id}): Não encontrado")
+        return False
+    
+    if not u.get('ativo'):
+        logger.info(f"❌ user_ativo({user_id}): ativo=0")
+        return False
+    
+    exp_str = u.get('expiracao', '')
+    if not exp_str:
+        logger.info(f"❌ user_ativo({user_id}): Sem expiração")
+        return False
+    
     try:
-        exp_str = u.get('expiracao', '')
-        if not exp_str: return False
-        exp = datetime.strptime(exp_str, "%Y-%m-%d %H:%M:%S")
-        if datetime.now(FUSO_BR) > exp:
+        # Tenta múltiplos formatos
+        exp = None
+        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]:
+            try:
+                exp = datetime.strptime(exp_str, fmt)
+                break
+            except: continue
+        
+        if not exp:
+            logger.error(f"❌ user_ativo({user_id}): Formato inválido: {exp_str}")
+            return False
+        
+        agora = datetime.now(FUSO_BR)
+        dias = (exp - agora).days
+        
+        logger.info(f"📅 user_ativo({user_id}): Exp={exp_str} | Agora={agora.strftime('%Y-%m-%d %H:%M:%S')} | Dias={dias}")
+        
+        if agora > exp:
+            logger.info(f"⏰ user_ativo({user_id}): EXPIRADO! Desativando...")
             desativar_user(user_id)
             return False
+        
+        logger.info(f"✅ user_ativo({user_id}): ATIVO! {dias} dias restantes")
         return True
-    except: return False
+        
+    except Exception as e:
+        logger.error(f"❌ user_ativo({user_id}): Erro: {e}")
+        return False
 
 def listar_users():
     conn = sqlite3.connect(DB_PATH)
@@ -377,11 +424,10 @@ class IQAPI:
         except: return False, None
 
 # ═══════════════════════════════════════════
-# MOTOR DE TRADING (RODA EM BACKGROUND)
+# MOTOR DE TRADING
 # ═══════════════════════════════════════════
 
-user_bots = {}  # Dicionário com os bots ativos
-user_locks = {}  # Locks para evitar operações simultâneas
+user_bots = {}
 
 async def trading_loop(user_id, app):
     """Loop principal de trading para um usuário"""
@@ -392,34 +438,33 @@ async def trading_loop(user_id, app):
             user = get_user(user_id)
             if not user or not user.get('bot_ligado') or not user_ativo(user_id):
                 logger.info(f"⏹️ Trading loop encerrado para user {user_id}")
+                if user_id in user_bots:
+                    del user_bots[user_id]
                 break
             
-            # Verificar stops
             res = resultado_dia(user_id)
             sl = user.get('stop_loss', 0)
             sw = user.get('stop_win', 0)
             
             if sl > 0 and res['lucro'] <= -sl:
-                try: await app.bot.send_message(user_id, f"🛑 *Stop Loss atingido!*\n💰 R$ {res['lucro']:.2f}", parse_mode="Markdown")
+                try: await app.bot.send_message(user_id, f"🛑 *Stop Loss!* R$ {res['lucro']:.2f}", parse_mode="Markdown")
                 except: pass
                 atualizar_user(user_id, bot_ligado=0)
                 break
             
             if sw > 0 and res['lucro'] >= sw:
-                try: await app.bot.send_message(user_id, f"🏆 *Stop Win atingido!*\n💰 R$ {res['lucro']:.2f}", parse_mode="Markdown")
+                try: await app.bot.send_message(user_id, f"🏆 *Stop Win!* R$ {res['lucro']:.2f}", parse_mode="Markdown")
                 except: pass
                 atualizar_user(user_id, bot_ligado=0)
                 break
             
-            # Obter API do usuário
-            if user_id not in user_bots:
+            if user_id not in user_bots or not user_bots[user_id].ok:
                 iq = IQAPI(user.get('iq_email', ''), user.get('iq_senha', ''), user.get('iq_conta', 'PRACTICE'))
                 ok, info = iq.conectar()
                 if ok:
                     user_bots[user_id] = iq
                     atualizar_user(user_id, conectado=1, saldo=info)
                 else:
-                    logger.error(f"❌ Falha conexão IQ para user {user_id}")
                     await asyncio.sleep(60)
                     continue
             
@@ -428,41 +473,29 @@ async def trading_loop(user_id, app):
                 await asyncio.sleep(30)
                 continue
             
-            # Atualizar velas
             iq.atualizar_velas()
-            
-            # Buscar sinal
             m = QuantumIA()
             sinal = m.melhor_par(iq.velas, [])
             
             if sinal:
-                logger.info(f"📡 Sinal user {user_id}: {sinal['ativo']} {sinal['direcao']} {sinal['confianca']:.0f}%")
+                logger.info(f"📡 User {user_id}: {sinal['ativo']} {sinal['direcao']} {sinal['confianca']:.0f}%")
                 
                 try:
                     await app.bot.send_message(user_id,
-                        f"⚛️ *SINAL DETECTADO*\n\n"
-                        f"💰 {sinal['ativo']}-OTC\n"
-                        f"📈 {sinal['direcao']} {'🟢' if sinal['direcao']=='CALL' else '🔴'}\n"
-                        f"📊 Confiança: {sinal['confianca']:.0f}%\n"
-                        f"🧠 Estratégias: {sinal['estrategias']}/5\n\n"
-                        f"⏳ Iniciando operação...",
+                        f"⚛️ *SINAL*\n💰 {sinal['ativo']}-OTC\n📈 {sinal['direcao']}\n📊 {sinal['confianca']:.0f}%\n🧠 {sinal['estrategias']}/5",
                         parse_mode="Markdown")
                 except: pass
                 
-                # Executar operação
                 valor = user.get('valor_entrada', 2.0)
                 max_gales = user.get('max_gales', 1)
                 multiplicador = user.get('multiplicador', 2.0)
                 
                 for tentativa in range(max_gales + 1):
                     val = round(valor * (multiplicador ** tentativa), 2)
-                    
                     saldo_antes = iq.get_saldo()
-                    ok, order_id = iq.comprar(sinal['ativo'], sinal['direcao'], 1, val)
+                    ok, _ = iq.comprar(sinal['ativo'], sinal['direcao'], 1, val)
                     
                     if not ok: continue
-                    
-                    # Aguardar resultado
                     await asyncio.sleep(65)
                     
                     saldo_depois = iq.get_saldo()
@@ -472,40 +505,25 @@ async def trading_loop(user_id, app):
                         salvar_trade(user_id, sinal['ativo'], sinal['direcao'], val, "win", abs(lucro))
                         atualizar_user(user_id, saldo=saldo_depois)
                         g = f" (Gale {tentativa})" if tentativa > 0 else ""
-                        try:
-                            await app.bot.send_message(user_id,
-                                f"✅ *WIN{g}!*\n\n"
-                                f"💰 {sinal['ativo']} {sinal['direcao']}\n"
-                                f"💵 +R$ {abs(lucro):.2f}\n"
-                                f"📊 Lucro dia: R$ {res['lucro']+abs(lucro):.2f}",
-                                parse_mode="Markdown")
+                        try: await app.bot.send_message(user_id, f"✅ *WIN{g}!* +R$ {abs(lucro):.2f}", parse_mode="Markdown")
                         except: pass
                         break
                     elif lucro < 0:
-                        if tentativa < max_gales:
-                            logger.info(f"🔄 Gale {tentativa+1} para user {user_id}")
-                            continue
+                        if tentativa < max_gales: continue
                         salvar_trade(user_id, sinal['ativo'], sinal['direcao'], val, "loss", -val)
                         atualizar_user(user_id, saldo=saldo_depois)
-                        try:
-                            await app.bot.send_message(user_id,
-                                f"❌ *LOSS*\n\n"
-                                f"💰 {sinal['ativo']} {sinal['direcao']}\n"
-                                f"💵 -R$ {val:.2f}\n"
-                                f"📊 Lucro dia: R$ {res['lucro']-val:.2f}",
-                                parse_mode="Markdown")
+                        try: await app.bot.send_message(user_id, f"❌ *LOSS* -R$ {val:.2f}", parse_mode="Markdown")
                         except: pass
                     break
             
-            # Aguardar próximo ciclo
             await asyncio.sleep(30)
             
         except Exception as e:
-            logger.error(f"❌ Erro trading user {user_id}: {e}")
+            logger.error(f"❌ Trading user {user_id}: {e}")
             await asyncio.sleep(30)
 
 # ═══════════════════════════════════════════
-# ESTADOS DA CONFIGURAÇÃO
+# ESTADOS
 # ═══════════════════════════════════════════
 (CONF_EMAIL, CONF_SENHA, CONF_CONTA, CONF_VALOR, 
  CONF_MULTI, CONF_GALES, CONF_SL, CONF_SW) = range(8)
@@ -522,20 +540,17 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not user:
         criar_usuario(user_id, update.effective_user.username, nome)
         await update.message.reply_text(
-            f"👋 Olá, *{nome}*!\n\n"
-            f"🎁 *3 dias grátis!*\n\n"
-            f"/configurar - Setup IQ Option\n"
-            f"/ligar - Iniciar bot automático\n"
-            f"/parar - Parar bot\n"
-            f"/status - Ver resultados",
+            f"👋 Olá, *{nome}*!\n\n🎁 *3 dias grátis!*\n\n"
+            f"/configurar - Setup IQ Option\n/ligar - Iniciar bot\n/parar - Parar\n/status - Resultados",
             parse_mode="Markdown"
         )
     else:
-        if user_ativo(user_id):
+        ativo = user_ativo(user_id)
+        if ativo:
             try:
                 exp = datetime.strptime(user.get('expiracao', ''), "%Y-%m-%d %H:%M:%S")
-                dias = (exp - datetime.now(FUSO_BR)).days
-                s = f"✅ {dias} dias restantes"
+                dias = max(0, (exp - datetime.now(FUSO_BR)).days)
+                s = f"✅ {dias} dias"
             except: s = "✅ Ativo"
         else:
             s = "⛔ Expirado"
@@ -555,16 +570,10 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     taxa = (res['wins']/res['total']*100) if res['total'] > 0 else 0
     
     await update.message.reply_text(
-        f"⚛️ *STATUS*\n\n"
-        f"🤖 {'🟢 Ligado' if user.get('bot_ligado') else '🔴 Desligado'}\n"
-        f"💰 Saldo: R$ {user.get('saldo', 0):.2f}\n"
-        f"💹 {user.get('iq_conta', 'PRACTICE')}\n\n"
-        f"📊 *Hoje:*\n"
-        f"📈 Ops: {res['total']}\n"
-        f"✅ Wins: {res['wins']}\n"
-        f"❌ Losses: {res['losses']}\n"
-        f"🎯 Taxa: {taxa:.0f}%\n"
-        f"💰 Lucro: R$ {res['lucro']:.2f}",
+        f"⚛️ *STATUS*\n\n🤖 {'🟢 Ligado' if user.get('bot_ligado') else '🔴 Desligado'}\n"
+        f"💰 Saldo: R$ {user.get('saldo', 0):.2f}\n💹 {user.get('iq_conta', 'PRACTICE')}\n\n"
+        f"📊 *Hoje:*\n📈 Ops: {res['total']}\n✅ Wins: {res['wins']}\n❌ Losses: {res['losses']}\n"
+        f"🎯 Taxa: {taxa:.0f}%\n💰 Lucro: R$ {res['lucro']:.2f}",
         parse_mode="Markdown"
     )
 
@@ -577,16 +586,10 @@ async def cmd_ligar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Use /configurar primeiro"); return
     
     atualizar_user(user_id, bot_ligado=1)
-    
-    # Iniciar trading loop
     asyncio.create_task(trading_loop(user_id, ctx.application))
     
     await update.message.reply_text(
-        f"✅ *Bot ligado!*\n\n"
-        f"💰 Saldo: R$ {user.get('saldo', 0):.2f}\n"
-        f"🤖 Auto operação ativada\n"
-        f"📊 3/5 estratégias = Entra\n\n"
-        f"/parar - Desligar\n/status - Resultados",
+        f"✅ *Bot ligado!*\n\n💰 Saldo: R$ {user.get('saldo', 0):.2f}\n🤖 Auto operação ativada\n📊 3/5 = Entra\n\n/parar /status",
         parse_mode="Markdown"
     )
 
@@ -594,21 +597,12 @@ async def cmd_parar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     atualizar_user(user_id, bot_ligado=0)
     res = resultado_dia(user_id)
-    await update.message.reply_text(
-        f"🔴 *Bot desligado*\n📊 Hoje: {res['wins']}W/{res['losses']}L | R$ {res['lucro']:.2f}",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"🔴 *Bot desligado*\n📊 Hoje: {res['wins']}W/{res['losses']}L | R$ {res['lucro']:.2f}", parse_mode="Markdown")
 
 async def cmd_ajuda(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 *COMANDOS*\n\n"
-        "/start - Iniciar (3 dias grátis)\n"
-        "/configurar - Setup IQ Option\n"
-        "/ligar - Ligar bot automático\n"
-        "/parar - Parar bot\n"
-        "/status - Ver resultados\n"
-        "/ajuda - Esta mensagem\n\n"
-        "💳 @natanbinario",
+        "📚 *COMANDOS*\n\n/start - Iniciar (3 dias grátis)\n/configurar - Setup IQ Option\n"
+        "/ligar - Ligar bot\n/parar - Parar bot\n/status - Ver resultados\n\n💳 @natanbinario",
         parse_mode="Markdown"
     )
 
@@ -619,12 +613,12 @@ async def cmd_ajuda(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_configurar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not user_ativo(update.effective_user.id):
         await update.message.reply_text("⛔ Acesso expirado!"); return ConversationHandler.END
-    await update.message.reply_text("⚙️ *Configuração IQ Option*\n\n📧 Digite seu email:", parse_mode="Markdown")
+    await update.message.reply_text("⚙️ *Config IQ Option*\n\n📧 Email:", parse_mode="Markdown")
     return CONF_EMAIL
 
 async def conf_email(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data['email'] = update.message.text.strip()
-    await update.message.reply_text("🔒 Digite sua senha:", parse_mode="Markdown")
+    await update.message.reply_text("🔒 Senha:", parse_mode="Markdown")
     return CONF_SENHA
 
 async def conf_senha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -632,37 +626,37 @@ async def conf_senha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: await update.message.delete()
     except: pass
     kb = [[InlineKeyboardButton("🎯 DEMO", callback_data="conta_PRACTICE"), InlineKeyboardButton("💰 REAL", callback_data="conta_REAL")]]
-    await update.message.reply_text("📊 Tipo de conta:", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text("📊 Conta:", reply_markup=InlineKeyboardMarkup(kb))
     return CONF_CONTA
 
 async def conf_conta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     ctx.user_data['conta'] = q.data.replace("conta_", "")
-    await q.edit_message_text(f"✅ {ctx.user_data['conta']}\n\n💰 Valor de entrada (R$):")
+    await q.edit_message_text(f"✅ {ctx.user_data['conta']}\n\n💰 Valor entrada (R$):")
     return CONF_VALOR
 
 async def conf_valor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: ctx.user_data['valor'] = float(update.message.text.strip().replace(',','.'))
     except: await update.message.reply_text("❌ Inválido"); return CONF_VALOR
-    await update.message.reply_text("🔄 Multiplicador do Gale:\nEx: 2.0")
+    await update.message.reply_text("🔄 Multiplicador Gale:\nEx: 2.0")
     return CONF_MULTI
 
 async def conf_multi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: ctx.user_data['multi'] = float(update.message.text.strip().replace(',','.'))
     except: await update.message.reply_text("❌ Inválido"); return CONF_MULTI
-    await update.message.reply_text("🎯 Máximo de Gales:\nEx: 1")
+    await update.message.reply_text("🎯 Max Gales:\nEx: 1")
     return CONF_GALES
 
 async def conf_gales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: ctx.user_data['gales'] = int(update.message.text.strip())
     except: await update.message.reply_text("❌ Inválido"); return CONF_GALES
-    await update.message.reply_text("🛑 Stop Loss (R$):\n0 = desativado")
+    await update.message.reply_text("🛑 Stop Loss (R$):\n0 = off")
     return CONF_SL
 
 async def conf_sl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try: ctx.user_data['sl'] = float(update.message.text.strip().replace(',','.'))
     except: await update.message.reply_text("❌ Inválido"); return CONF_SL
-    await update.message.reply_text("🏆 Stop Win (R$):\n0 = desativado")
+    await update.message.reply_text("🏆 Stop Win (R$):\n0 = off")
     return CONF_SW
 
 async def conf_sw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -671,18 +665,13 @@ async def conf_sw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except: await update.message.reply_text("❌ Inválido"); return CONF_SW
     
     d = ctx.user_data
-    atualizar_user(user_id, 
-        iq_email=d['email'], iq_senha=d['senha'], iq_conta=d['conta'],
-        valor_entrada=d['valor'], multiplicador=d['multi'], max_gales=d['gales'],
-        stop_loss=d['sl'], stop_win=d['sw']
-    )
+    atualizar_user(user_id, iq_email=d['email'], iq_senha=d['senha'], iq_conta=d['conta'],
+                   valor_entrada=d['valor'], multiplicador=d['multi'], max_gales=d['gales'],
+                   stop_loss=d['sl'], stop_win=d['sw'])
     
     await update.message.reply_text(
-        f"✅ *Configuração salva!*\n\n"
-        f"📧 {d['email']}\n📊 {d['conta']}\n"
-        f"💰 R$ {d['valor']}\n🔄 {d['multi']}x (max {d['gales']})\n"
-        f"🛑 Stop L: R$ {d['sl']}\n🏆 Stop W: R$ {d['sw']}\n\n"
-        f"/ligar para iniciar!",
+        f"✅ *Salvo!*\n\n📧 {d['email']}\n📊 {d['conta']}\n💰 R$ {d['valor']}\n🔄 {d['multi']}x (max {d['gales']})\n"
+        f"🛑 Stop L: R$ {d['sl']}\n🏆 Stop W: R$ {d['sw']}\n\n/ligar para iniciar!",
         parse_mode="Markdown"
     )
     return ConversationHandler.END
@@ -705,7 +694,7 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     bots = sum(1 for u in users if u['bot'])
     
     texto = f"👑 *PAINEL ADMIN*\n\n📊 Total: {total} | 🟢 {ativos} | 🤖 {bots}\n\n"
-    for u in users[:10]:
+    for u in users[:15]:
         s = "🟢" if u['ativo'] else "🔴"
         b = "🤖" if u['bot'] else "💤"
         exp = (u['exp'] or '')[:10]
