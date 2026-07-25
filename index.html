@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>⚛️ Quantum IA</title>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <link rel="manifest" href="/manifest.json">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0a; color: #fff; font-family: Arial; padding: 15px; max-width: 500px; margin: 0 auto; }
+        .header { text-align: center; padding: 20px; background: linear-gradient(45deg, #6c00ff, #00d4ff); border-radius: 15px; margin-bottom: 15px; }
+        .header h1 { font-size: 24px; }
+        .card { background: #1a1a1a; border-radius: 15px; padding: 15px; margin-bottom: 10px; }
+        .card h3 { color: #00d4ff; margin-bottom: 10px; }
+        .status { font-size: 20px; font-weight: bold; padding: 10px; border-radius: 10px; text-align: center; margin: 10px 0; }
+        .online { background: #00ff8822; color: #00ff88; }
+        .offline { background: #ff004422; color: #ff4444; }
+        .row { display: flex; gap: 10px; margin: 10px 0; }
+        .btn { flex: 1; padding: 15px; border: none; border-radius: 10px; font-size: 14px; font-weight: bold; cursor: pointer; color: white; }
+        .btn-success { background: #00ff88; color: #000; }
+        .btn-danger { background: #ff4444; }
+        .btn-info { background: #00d4ff; color: #000; }
+        .btn-primary { background: #6c00ff; }
+        .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        .stat { background: #252525; padding: 15px; border-radius: 10px; text-align: center; }
+        .stat .value { font-size: 20px; font-weight: bold; color: #00d4ff; }
+        .stat .label { font-size: 11px; color: #888; }
+        input, select { width: 100%; padding: 12px; background: #252525; border: 1px solid #333; border-radius: 10px; color: white; font-size: 14px; margin: 5px 0; }
+        label { color: #888; font-size: 12px; display: block; margin-top: 8px; }
+        .hidden { display: none; }
+        .tab-bar { display: flex; margin-bottom: 15px; background: #1a1a1a; border-radius: 10px; overflow: hidden; }
+        .tab { flex: 1; padding: 12px; text-align: center; cursor: pointer; font-weight: bold; font-size: 11px; border: none; background: transparent; color: #888; }
+        .tab.active { background: #6c00ff; color: white; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .saved { background: #00ff8822; color: #00ff88; padding: 10px; border-radius: 10px; text-align: center; margin: 10px 0; display: none; }
+    </style>
+</head>
+<body>
+    <div id="loginScreen">
+        <div class="header"><h1>⚛️ QUANTUM IA</h1><p>Painel de Controle</p></div>
+        <div class="card">
+            <h3>🔐 Login</h3>
+            <input type="email" id="loginEmail" placeholder="Email">
+            <input type="password" id="loginSenha" placeholder="Senha">
+            <button class="btn btn-success" onclick="login()" style="width:100%;margin-top:10px">▶️ ENTRAR</button>
+        </div>
+    </div>
+
+    <div id="mainScreen" class="hidden">
+        <div class="header"><h1>⚛️ QUANTUM IA</h1><p id="saldoDisplay">💰 Carregando...</p></div>
+        
+        <div class="tab-bar">
+            <button class="tab active" onclick="showTab('dashboard')">📊 Painel</button>
+            <button class="tab" onclick="showTab('config')">⚙️ Config</button>
+            <button class="tab admin-only hidden" id="tabAdmin" onclick="showTab('admin')">👑 Admin</button>
+        </div>
+
+        <div id="tab-dashboard" class="tab-content active">
+            <div class="card"><h3>🤖 Status</h3>
+                <div id="statusBot" class="status">🔄 Carregando...</div>
+                <div class="row">
+                    <button class="btn btn-success" onclick="ligar()">▶️ LIGAR</button>
+                    <button class="btn btn-danger" onclick="desligar()">⏹️ DESLIGAR</button>
+                </div>
+            </div>
+            <div class="card"><h3>📊 Hoje</h3>
+                <div class="stats">
+                    <div class="stat"><div class="value" id="totalOps">0</div><div class="label">Operações</div></div>
+                    <div class="stat"><div class="value" id="totalWins">0</div><div class="label">✅ Wins</div></div>
+                    <div class="stat"><div class="value" id="totalLosses">0</div><div class="label">❌ Losses</div></div>
+                    <div class="stat"><div class="value" id="totalLucro">R$ 0</div><div class="label">💰 Lucro</div></div>
+                </div>
+            </div>
+        </div>
+
+        <div id="tab-config" class="tab-content">
+            <div class="card"><h3>💹 IQ Option</h3>
+                <label>📧 Email</label><input type="email" id="cfg_email">
+                <label>🔒 Senha</label><input type="password" id="cfg_senha">
+                <label>📊 Conta</label><select id="cfg_conta"><option value="PRACTICE">🎯 DEMO</option><option value="REAL">💰 REAL</option></select>
+            </div>
+            <div class="card"><h3>💰 Valores</h3>
+                <label>💵 Entrada (R$)</label><input type="number" id="cfg_valor" step="0.5">
+                <label>🔄 Multiplicador</label><input type="number" id="cfg_multi" step="0.1">
+                <label>🎯 Max Gales</label><input type="number" id="cfg_gales">
+            </div>
+            <div class="card"><h3>🛑 Stops</h3>
+                <label>🔴 Stop Loss</label><input type="number" id="cfg_sl">
+                <label>🟢 Stop Win</label><input type="number" id="cfg_sw">
+            </div>
+            <div id="savedMsg" class="saved">✅ Salvo!</div>
+            <button class="btn btn-success" onclick="salvarConfig()" style="width:100%">💾 SALVAR</button>
+        </div>
+
+        <div id="tab-admin" class="tab-content">
+            <div class="card"><h3>👑 Gerenciar Acessos</h3>
+                <input type="email" id="adminEmail" placeholder="Email do cliente">
+                <div class="row">
+                    <input type="number" id="adminDias" placeholder="Dias" value="30" style="flex:1">
+                    <button class="btn btn-success" onclick="adminAtivar()" style="flex:1">✅ ATIVAR</button>
+                </div>
+                <button class="btn btn-danger" onclick="adminDesativar()" style="width:100%;margin-top:5px">🚫 DESATIVAR</button>
+            </div>
+            <div class="card"><h3>👥 Usuários</h3><div id="adminLista">Carregando...</div></div>
+        </div>
+
+        <button class="btn btn-danger" onclick="logout()" style="width:100%;margin-top:15px">🚪 SAIR</button>
+    </div>
+
+    <script>
+        const API = "https://botroben-production.up.railway.app/api";
+        let userData = JSON.parse(localStorage.getItem("qt_user") || "null");
+        let isAdmin = userData?.admin || false;
+        
+        if (userData) showMain();
+
+        async function login() {
+            const resp = await fetch(API + "/login", {
+                method: "POST", headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({email: document.getElementById("loginEmail").value, senha: document.getElementById("loginSenha").value})
+            });
+            const data = await resp.json();
+            if (data.status === "ok") {
+                userData = data.user;
+                localStorage.setItem("qt_user", JSON.stringify(userData));
+                isAdmin = userData.admin;
+                showMain();
+            } else { alert(data.msg); }
+        }
+
+        function showMain() {
+            document.getElementById("loginScreen").classList.add("hidden");
+            document.getElementById("mainScreen").classList.remove("hidden");
+            if (isAdmin) document.getElementById("tabAdmin").classList.remove("hidden");
+            carregarDados();
+            carregarConfig();
+        }
+
+        function logout() { localStorage.clear(); location.reload(); }
+
+        function showTab(t) {
+            document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(x => x.classList.remove('active'));
+            document.querySelector(`[onclick="showTab('${t}')"]`).classList.add('active');
+            document.getElementById(`tab-${t}`).classList.add('active');
+            if (t === 'admin') carregarAdmin();
+            if (t === 'config') carregarConfig();
+        }
+
+        async function carregarDados() {
+            try {
+                const resp = await fetch(API + "/status", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({email: userData.email})});
+                const data = await resp.json();
+                const s = document.getElementById("statusBot");
+                s.className = data.bot_ligado ? "status online" : "status offline";
+                s.innerHTML = data.bot_ligado ? "🟢 ONLINE" : "🔴 DESLIGADO";
+                document.getElementById("saldoDisplay").innerHTML = `💰 Saldo: R$ ${(data.saldo||0).toFixed(2)}`;
+                document.getElementById("totalOps").innerText = data.hoje?.total || 0;
+                document.getElementById("totalWins").innerText = data.hoje?.wins || 0;
+                document.getElementById("totalLosses").innerText = data.hoje?.losses || 0;
+                document.getElementById("totalLucro").innerText = `R$ ${(data.hoje?.lucro||0).toFixed(2)}`;
+            } catch(e) {}
+        }
+
+        async function carregarConfig() {
+            document.getElementById("cfg_email").value = userData.iq_email || '';
+            document.getElementById("cfg_conta").value = userData.iq_conta || 'PRACTICE';
+            document.getElementById("cfg_valor").value = userData.valor_entrada || 2;
+            document.getElementById("cfg_multi").value = userData.multiplicador || 2;
+            document.getElementById("cfg_gales").value = userData.max_gales || 1;
+            document.getElementById("cfg_sl").value = userData.stop_loss || 0;
+            document.getElementById("cfg_sw").value = userData.stop_win || 0;
+        }
+
+        async function salvarConfig() {
+            await fetch(API + "/config", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({
+                email: userData.email, iq_email: document.getElementById("cfg_email").value,
+                iq_senha: document.getElementById("cfg_senha").value || userData.iq_senha,
+                iq_conta: document.getElementById("cfg_conta").value,
+                valor_entrada: parseFloat(document.getElementById("cfg_valor").value),
+                multiplicador: parseFloat(document.getElementById("cfg_multi").value),
+                max_gales: parseInt(document.getElementById("cfg_gales").value),
+                stop_loss: parseFloat(document.getElementById("cfg_sl").value),
+                stop_win: parseFloat(document.getElementById("cfg_sw").value)
+            })});
+            document.getElementById("savedMsg").style.display = "block";
+            setTimeout(() => document.getElementById("savedMsg").style.display = "none", 2000);
+        }
+
+        async function ligar() {
+            await fetch(API + "/ligar", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({email: userData.email})});
+            carregarDados();
+        }
+
+        async function desligar() {
+            await fetch(API + "/desligar", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({email: userData.email})});
+            carregarDados();
+        }
+
+        async function carregarAdmin() {
+            const resp = await fetch(API + "/admin/usuarios", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({email: userData.email})});
+            const data = await resp.json();
+            const div = document.getElementById("adminLista");
+            if (!data.length) { div.innerHTML = "Nenhum usuário."; return; }
+            div.innerHTML = data.map(u => `<div style="padding:10px;background:#252525;border-radius:8px;margin:5px 0;font-size:12px;display:flex;justify-content:space-between"><div><b>${u.nome||'Sem nome'}</b><br><span style="color:#888">${u.email}</span></div><span class="${u.ativo?'badge-active':'badge-expired'}" style="padding:4px 8px;border-radius:5px;font-size:10px;font-weight:bold;background:${u.ativo?'#00ff8822':'#ff004422'};color:${u.ativo?'#00ff88':'#ff4444'}">${u.ativo?'ATIVO':'EXPIRADO'}</span></div>`).join("");
+        }
+
+        async function adminAtivar() {
+            const email = document.getElementById("adminEmail").value;
+            const dias = document.getElementById("adminDias").value;
+            if (!email) return alert("Digite o email!");
+            await fetch(API + "/admin/ativar", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({admin_email: userData.email, email, dias: parseInt(dias)})});
+            carregarAdmin(); alert("Ativado!");
+        }
+
+        async function adminDesativar() {
+            const email = document.getElementById("adminEmail").value;
+            if (!email) return alert("Digite o email!");
+            await fetch(API + "/admin/desativar", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({admin_email: userData.email, email})});
+            carregarAdmin(); alert("Desativado!");
+        }
+
+        setInterval(carregarDados, 5000);
+    </script>
+</body>
+</html>
