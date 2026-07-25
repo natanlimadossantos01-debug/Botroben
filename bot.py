@@ -4,7 +4,7 @@
 ⚛️ Trader Professor Automático
 👥 Acesso livre, sem licenças
 👑 Admin pode desativar usuários
-🔄 CORRIGIDO: Isolamento de conexões por usuário
+🔄 CORRIGIDO: Processos isolados por usuário
 """
 
 import asyncio
@@ -13,9 +13,14 @@ import os
 import re
 import sqlite3
 import time
-import numpy as np
+import json
+import subprocess
+import sys
+import tempfile
+from multiprocessing import Process, Queue, Manager
 from datetime import datetime, timedelta, timezone
 from collections import deque
+import numpy as np
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -64,7 +69,9 @@ def init_db():
             saldo REAL DEFAULT 0,
             ativo INTEGER DEFAULT 1,
             cadastro TEXT DEFAULT '',
-            ultimo_uso TEXT DEFAULT ''
+            ultimo_uso TEXT DEFAULT '',
+            processo_ativo INTEGER DEFAULT 0,
+            pid INTEGER DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,7 +118,7 @@ def atualizar_user(user_id, **kwargs):
 
 def desativar_user(user_id):
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE users SET ativo=0, bot_ligado=0 WHERE user_id=?", (user_id,))
+    conn.execute("UPDATE users SET ativo=0, bot_ligado=0, processo_ativo=0 WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
 
@@ -122,10 +129,19 @@ def user_ativo(user_id):
 def listar_users():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT user_id, username, first_name, ativo, bot_ligado, saldo, iq_email FROM users ORDER BY cadastro DESC")
+    c.execute("SELECT user_id, username, first_name, ativo, bot_ligado, saldo, iq_email, processo_ativo FROM users ORDER BY cadastro DESC")
     rows = []
     for r in c.fetchall():
-        rows.append({"id": r[0], "user": r[1] or "", "nome": r[2] or f"User{r[0]}", "ativo": r[3], "bot": r[4], "saldo": r[5] or 0, "email": r[6] or ""})
+        rows.append({
+            "id": r[0], 
+            "user": r[1] or "", 
+            "nome": r[2] or f"User{r[0]}", 
+            "ativo": r[3], 
+            "bot": r[4], 
+            "saldo": r[5] or 0, 
+            "email": r[6] or "",
+            "processo": r[7] or 0
+        })
     conn.close()
     return rows
 
@@ -148,7 +164,7 @@ def resultado_dia(user_id):
     return {"total": t or 0, "wins": w or 0, "losses": l or 0, "lucro": lc or 0.0}
 
 # ═══════════════════════════════════════════
-# 5 ESTRATÉGIAS (mantidas iguais)
+# 5 ESTRATÉGIAS
 # ═══════════════════════════════════════════
 class Mortalha:
     def sma(self, d, p):
@@ -296,268 +312,158 @@ class QuantumIA:
         return melhor
 
 # ═══════════════════════════════════════════
-# IQ OPTION API - CORRIGIDA
+# PROCESSO ISOLADO PARA CADA USUÁRIO
 # ═══════════════════════════════════════════
-class IQAPI:
-    def __init__(self, email, senha, conta='PRACTICE'):
-        self.email = email
-        self.senha = senha
-        self.conta = conta
-        self.api = None
-        self.velas = {nome: deque(maxlen=100) for nome in ["EURUSD","GBPUSD","EURGBP"]}
-        self.ok = False
-        self.ativo_map = {"EURUSD":"EURUSD-OTC", "GBPUSD":"GBPUSD-OTC", "EURGBP":"EURGBP-OTC"}
-        self._lock = asyncio.Lock()
-        self._conectando = False
 
-    def conectar(self):
-        """Conecta com a IQ Option - Método síncrono"""
-        from iqoptionapi.stable_api import IQ_Option
+def trading_process(user_id, bot_token):
+    """Processo separado para cada usuário - ISOLADO TOTALMENTE"""
+    
+    # Importa dentro do processo para evitar compartilhamento
+    from iqoptionapi.stable_api import IQ_Option
+    import time
+    from datetime import datetime, timedelta, timezone
+    import sqlite3
+    import logging
+    import sys
+    import os
+    import numpy as np
+    
+    # Configura logging do processo
+    logging.basicConfig(
+        format="%(asctime)s [PID %(process)d] [%(levelname)s] %(message)s",
+        level=logging.INFO
+    )
+    logger = logging.getLogger(f"Trader_{user_id}")
+    
+    logger.info(f"🚀 Processo iniciado para usuário {user_id}")
+    
+    # DB path absoluto
+    db_path = os.path.abspath("quantum_users.db")
+    
+    def get_user_local(uid):
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("SELECT * FROM users WHERE user_id=?", (uid,))
+        row = c.fetchone()
+        cols = [d[0] for d in c.description] if c.description else []
+        conn.close()
+        return dict(zip(cols, row)) if row else None
+    
+    def atualizar_user_local(uid, **kwargs):
+        conn = sqlite3.connect(db_path)
+        sets = ", ".join(f"{k}=?" for k in kwargs)
+        vals = list(kwargs.values()) + [uid]
+        conn.execute(f"UPDATE users SET {sets} WHERE user_id=?", vals)
+        conn.commit()
+        conn.close()
+    
+    def salvar_trade_local(uid, ativo, direcao, valor, resultado, lucro):
+        conn = sqlite3.connect(db_path)
+        now = datetime.now(timezone(timedelta(hours=-3))).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute("INSERT INTO trades (user_id, data, ativo, direcao, valor, resultado, lucro) VALUES (?,?,?,?,?,?,?)",
+                     (uid, now, ativo, direcao, valor, resultado, lucro))
+        conn.commit()
+        conn.close()
+    
+    # Cria instância ISOLADA da IQ Option
+    api = None
+    ok = False
+    ativo_map = {"EURUSD":"EURUSD-OTC", "GBPUSD":"GBPUSD-OTC", "EURGBP":"EURGBP-OTC"}
+    velas = {nome: deque(maxlen=100) for nome in ["EURUSD","GBPUSD","EURGBP"]}
+    
+    while True:
         try:
-            # Garante que a conexão anterior seja fechada
-            if self.api is not None:
-                try:
-                    self.api.disconnect()
-                    logger.info(f"Desconectado instância antiga para {self.email}")
-                except:
-                    pass
-                self.api = None
-
-            self.api = IQ_Option(self.email, self.senha)
-            ok, mensagem = self.api.connect()
+            # Verifica se o bot ainda deve rodar
+            user = get_user_local(user_id)
+            if not user:
+                logger.info(f"Usuário {user_id} não encontrado")
+                break
+            if not user.get('ativo', 1):
+                logger.info(f"Usuário {user_id} desativado")
+                break
+            if not user.get('bot_ligado', 0):
+                logger.info(f"Bot desligado para {user_id}")
+                break
             
-            if ok:
-                self.api.change_balance(self.conta)
-                self.ok = True
-                saldo = self.api.get_balance()
-                logger.info(f"✅ Conectado: {self.email} | Saldo: {saldo}")
-                return True, saldo
-            else:
-                logger.error(f"❌ Falha ao conectar {self.email}: {mensagem}")
-                self.ok = False
-                return False, 0
+            # Conecta se necessário
+            if not ok or api is None:
+                email = user.get('iq_email', '')
+                senha = user.get('iq_senha', '')
+                conta = user.get('iq_conta', 'PRACTICE')
                 
-        except Exception as e:
-            logger.error(f"❌ Erro na conexão {self.email}: {e}")
-            self.ok = False
-            return False, 0
-
-    async def conectar_async(self):
-        """Versão assíncrona da conexão"""
-        if self._conectando:
-            logger.info(f"⏳ Conexão em andamento para {self.email}, aguardando...")
-            return False, 0
-            
-        async with self._lock:
-            self._conectando = True
-            try:
-                # Executa a conexão síncrona em thread separada
-                loop = asyncio.get_event_loop()
-                ok, saldo = await loop.run_in_executor(None, self.conectar)
-                return ok, saldo
-            finally:
-                self._conectando = False
-
-    def _desconectar(self):
-        """Desconecta a API atual"""
-        if self.api:
-            try:
-                self.api.disconnect()
-                logger.info(f"Desconectado: {self.email}")
-            except:
-                pass
-            self.api = None
-            self.ok = False
-
-    async def reconectar(self):
-        """Reconecta com novas credenciais"""
-        self._desconectar()
-        await asyncio.sleep(1)
-        return await self.conectar_async()
-
-    async def atualizar_velas_async(self):
-        """Atualiza velas de forma assíncrona"""
-        if not self.ok:
-            return
-            
-        try:
-            loop = asyncio.get_event_loop()
-            for nome, ativo_id in self.ativo_map.items():
+                if not email or not senha:
+                    logger.warning(f"Credenciais não configuradas para {user_id}")
+                    time.sleep(60)
+                    continue
+                
+                # DESCONECTA instância anterior se existir
+                if api is not None:
+                    try:
+                        api.disconnect()
+                    except:
+                        pass
+                    api = None
+                
+                # CRIA NOVA INSTÂNCIA TOTALMENTE ISOLADA
                 try:
-                    candles = await loop.run_in_executor(
-                        None,
-                        self.api.get_candles,
-                        ativo_id, 60, 80, time.time()
-                    )
+                    api = IQ_Option(email, senha)
+                    ok, mensagem = api.connect()
+                    
+                    if ok:
+                        api.change_balance(conta)
+                        saldo = api.get_balance()
+                        atualizar_user_local(user_id, conectado=1, saldo=saldo)
+                        logger.info(f"✅ Conectado {email} | Saldo: {saldo}")
+                    else:
+                        logger.error(f"❌ Falha conexão {email}: {mensagem}")
+                        ok = False
+                        api = None
+                        time.sleep(60)
+                        continue
+                except Exception as e:
+                    logger.error(f"Erro ao conectar: {e}")
+                    ok = False
+                    api = None
+                    time.sleep(60)
+                    continue
+            
+            # Atualiza velas
+            try:
+                for nome, ativo_id in ativo_map.items():
+                    candles = api.get_candles(ativo_id, 60, 80, time.time())
                     if candles and len(candles) > 0:
-                        self.velas[nome].clear()
+                        velas[nome].clear()
                         for x in candles[-80:]:
                             if isinstance(x, dict):
-                                self.velas[nome].append({
-                                    'time': datetime.fromtimestamp(x.get('from', 0), FUSO_BR),
+                                velas[nome].append({
+                                    'time': datetime.fromtimestamp(x.get('from', 0), timezone(timedelta(hours=-3))),
                                     'open': float(x['open']),
                                     'high': float(x['max']),
                                     'low': float(x['min']),
                                     'close': float(x['close']),
                                     'volume': int(x.get('volume', 0))
                                 })
-                except Exception as e:
-                    logger.warning(f"Erro ao obter velas {nome}: {e}")
-        except Exception as e:
-            logger.error(f"Erro ao atualizar velas: {e}")
-
-    async def get_saldo_async(self):
-        """Obtém saldo de forma assíncrona"""
-        if not self.ok or not self.api:
-            return 0
-        try:
-            loop = asyncio.get_event_loop()
-            saldo = await loop.run_in_executor(None, self.api.get_balance)
-            return float(saldo)
-        except:
-            return 0
-
-    async def comprar_async(self, ativo, direcao, exp, valor):
-        """Executa compra de forma assíncrona"""
-        if not self.ok:
-            return False, None
+            except Exception as e:
+                logger.warning(f"Erro ao atualizar velas: {e}")
+                ok = False
+                continue
             
-        ativo_id = self.ativo_map.get(ativo, ativo)
-        try:
-            loop = asyncio.get_event_loop()
-            ok, order_id = await loop.run_in_executor(
-                None, 
-                self.api.buy,
-                valor, ativo_id, direcao.lower(), exp
-            )
-            logger.info(f"💰 Compra {ativo} {direcao} valor={valor} -> {ok}")
-            return ok, order_id
-        except Exception as e:
-            logger.error(f"Erro na compra: {e}")
-            return False, None
-
-# ═══════════════════════════════════════════
-# MOTOR DE TRADING - CORRIGIDO
-# ═══════════════════════════════════════════
-user_bots = {}
-user_locks = {}
-bot_tasks = {}
-
-async def trading_loop(user_id, app):
-    """Loop de trading isolado por usuário"""
-    
-    # Cria um lock exclusivo para este usuário
-    if user_id not in user_locks:
-        user_locks[user_id] = asyncio.Lock()
-    
-    logger.info(f"🔄 Trading loop iniciado para user {user_id}")
-    
-    # Instância dedicada para este usuário
-    iq = None
-    tentativas_conexao = 0
-    max_tentativas = 5
-    
-    while True:
-        try:
-            # Verifica se o usuário ainda está ativo
-            user = get_user(user_id)
-            if not user:
-                logger.info(f"⏹️ Usuário {user_id} não encontrado")
-                break
-                
-            if not user.get('ativo', 1):
-                logger.info(f"⛔ Usuário {user_id} desativado")
-                break
-                
-            if not user.get('bot_ligado', 0):
-                logger.info(f"⏹️ Bot desligado para user {user_id}")
-                break
-            
-            # Verifica credenciais
-            email = user.get('iq_email', '')
-            senha = user.get('iq_senha', '')
-            if not email or not senha:
-                await app.bot.send_message(
-                    user_id,
-                    "❌ Credenciais não configuradas! Use /configurar",
-                    parse_mode="Markdown"
-                )
-                break
-            
-            # Cria nova conexão se não existir ou estiver inválida
-            if iq is None or not iq.ok:
-                if iq is not None:
-                    # Desconecta instância antiga
-                    try:
-                        iq._desconectar()
-                    except:
-                        pass
-                    iq = None
-                
-                # Cria nova instância DEDICADA
-                iq = IQAPI(email, senha, user.get('iq_conta', 'PRACTICE'))
-                ok, saldo = await iq.conectar_async()
-                
-                if not ok:
-                    tentativas_conexao += 1
-                    if tentativas_conexao >= max_tentativas:
-                        await app.bot.send_message(
-                            user_id,
-                            f"❌ Falha ao conectar após {max_tentativas} tentativas!\nVerifique credenciais.",
-                            parse_mode="Markdown"
-                        )
-                        break
-                    await asyncio.sleep(30)
-                    continue
-                
-                tentativas_conexao = 0
-                atualizar_user(user_id, conectado=1, saldo=saldo)
-                await app.bot.send_message(
-                    user_id,
-                    f"✅ Conectado!\n💰 Saldo: R$ {saldo:.2f}",
-                    parse_mode="Markdown"
-                )
-            
-            # Atualiza velas
-            await iq.atualizar_velas_async()
-            
-            # Verifica stop loss/win
-            res = resultado_dia(user_id)
-            sl = user.get('stop_loss', 0)
-            sw = user.get('stop_win', 0)
-            
-            if sl > 0 and res['lucro'] <= -sl:
-                await app.bot.send_message(
-                    user_id,
-                    f"🛑 *Stop Loss!* R$ {res['lucro']:.2f}",
-                    parse_mode="Markdown"
-                )
-                atualizar_user(user_id, bot_ligado=0)
-                break
-            
-            if sw > 0 and res['lucro'] >= sw:
-                await app.bot.send_message(
-                    user_id,
-                    f"🏆 *Stop Win!* R$ {res['lucro']:.2f}",
-                    parse_mode="Markdown"
-                )
-                atualizar_user(user_id, bot_ligado=0)
-                break
-            
-            # Analisa sinal
+            # Análise
             quantum = QuantumIA()
-            sinal = quantum.melhor_par(iq.velas, [])
+            sinal = quantum.melhor_par(velas, [])
             
             if sinal:
-                logger.info(f"📡 User {user_id}: {sinal['ativo']} {sinal['direcao']} {sinal['confianca']:.0f}%")
+                logger.info(f"📡 Sinal {sinal['ativo']} {sinal['direcao']} {sinal['confianca']:.0f}%")
                 
-                await app.bot.send_message(
-                    user_id,
-                    f"⚛️ *SINAL*\n💰 {sinal['ativo']}-OTC\n📈 {sinal['direcao']}\n📊 {sinal['confianca']:.0f}%\n🧠 {sinal['estrategias']}/5",
-                    parse_mode="Markdown"
-                )
+                # Envia mensagem via bot
+                try:
+                    import requests
+                    msg = f"⚛️ *SINAL*\n💰 {sinal['ativo']}-OTC\n📈 {sinal['direcao']}\n📊 {sinal['confianca']:.0f}%\n🧠 {sinal['estrategias']}/5"
+                    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                    requests.post(url, json={"chat_id": user_id, "text": msg, "parse_mode": "Markdown"})
+                except:
+                    pass
                 
-                # Executa trade
                 valor = user.get('valor_entrada', 2.0)
                 max_gales = user.get('max_gales', 1)
                 multiplicador = user.get('multiplicador', 2.0)
@@ -565,99 +471,98 @@ async def trading_loop(user_id, app):
                 for tentativa in range(max_gales + 1):
                     val = round(valor * (multiplicador ** tentativa), 2)
                     
-                    # Usa lock para garantir operação atômica
-                    async with user_locks[user_id]:
-                        saldo_antes = await iq.get_saldo_async()
-                        ok, order_id = await iq.comprar_async(
-                            sinal['ativo'], 
-                            sinal['direcao'], 
-                            1, 
-                            val
-                        )
-                    
-                    if not ok:
-                        continue
-                    
-                    await asyncio.sleep(65)
-                    
-                    saldo_depois = await iq.get_saldo_async()
-                    lucro = saldo_depois - saldo_antes
-                    
-                    if lucro > 0:
-                        salvar_trade(user_id, sinal['ativo'], sinal['direcao'], val, "win", abs(lucro))
-                        atualizar_user(user_id, saldo=saldo_depois)
-                        g = f" (Gale {tentativa})" if tentativa > 0 else ""
-                        await app.bot.send_message(
-                            user_id,
-                            f"✅ *WIN{g}!* +R$ {abs(lucro):.2f}",
-                            parse_mode="Markdown"
-                        )
-                        break
-                    elif lucro < 0:
-                        if tentativa < max_gales:
+                    try:
+                        saldo_antes = float(api.get_balance())
+                        ok_trade, order_id = api.buy(val, ativo_map[sinal['ativo']], sinal['direcao'].lower(), 1)
+                        
+                        if not ok_trade:
                             continue
-                        salvar_trade(user_id, sinal['ativo'], sinal['direcao'], val, "loss", -val)
-                        atualizar_user(user_id, saldo=saldo_depois)
-                        await app.bot.send_message(
-                            user_id,
-                            f"❌ *LOSS* -R$ {val:.2f}",
-                            parse_mode="Markdown"
-                        )
-                    break
+                        
+                        time.sleep(65)
+                        
+                        saldo_depois = float(api.get_balance())
+                        lucro = saldo_depois - saldo_antes
+                        
+                        if lucro > 0:
+                            salvar_trade_local(user_id, sinal['ativo'], sinal['direcao'], val, "win", abs(lucro))
+                            atualizar_user_local(user_id, saldo=saldo_depois)
+                            g = f" (Gale {tentativa})" if tentativa > 0 else ""
+                            try:
+                                msg = f"✅ *WIN{g}!* +R$ {abs(lucro):.2f}"
+                                requests.post(url, json={"chat_id": user_id, "text": msg, "parse_mode": "Markdown"})
+                            except:
+                                pass
+                            break
+                        elif lucro < 0:
+                            if tentativa < max_gales:
+                                continue
+                            salvar_trade_local(user_id, sinal['ativo'], sinal['direcao'], val, "loss", -val)
+                            atualizar_user_local(user_id, saldo=saldo_depois)
+                            try:
+                                msg = f"❌ *LOSS* -R$ {val:.2f}"
+                                requests.post(url, json={"chat_id": user_id, "text": msg, "parse_mode": "Markdown"})
+                            except:
+                                pass
+                        break
+                    except Exception as e:
+                        logger.error(f"Erro no trade: {e}")
+                        break
             
             # Aguarda próximo ciclo
-            await asyncio.sleep(30)
+            time.sleep(30)
             
-        except asyncio.CancelledError:
-            logger.info(f"⏹️ Loop cancelado para user {user_id}")
-            break
         except Exception as e:
-            logger.error(f"❌ Erro no trading user {user_id}: {e}", exc_info=True)
-            await asyncio.sleep(60)
+            logger.error(f"Erro no loop: {e}")
+            time.sleep(60)
     
     # Limpeza
-    if iq is not None:
+    if api is not None:
         try:
-            iq._desconectar()
+            api.disconnect()
         except:
             pass
     
-    if user_id in user_bots:
-        del user_bots[user_id]
-    if user_id in user_locks:
-        del user_locks[user_id]
-    if user_id in bot_tasks:
-        del bot_tasks[user_id]
-    
-    logger.info(f"🔚 Trading loop finalizado para user {user_id}")
+    atualizar_user_local(user_id, processo_ativo=0, pid=0, bot_ligado=0)
+    logger.info(f"🔚 Processo finalizado para {user_id}")
 
-async def iniciar_bot(user_id, app):
-    """Inicia o bot para um usuário específico"""
-    if user_id in bot_tasks and not bot_tasks[user_id].done():
+# ═══════════════════════════════════════════
+# GERENCIADOR DE PROCESSOS
+# ═══════════════════════════════════════════
+
+processes = {}
+
+def iniciar_processo(user_id, bot_token):
+    """Inicia um processo separado para o usuário"""
+    if user_id in processes and processes[user_id].is_alive():
         return False
     
-    task = asyncio.create_task(trading_loop(user_id, app))
-    bot_tasks[user_id] = task
+    # Cria e inicia processo
+    p = Process(target=trading_process, args=(user_id, bot_token))
+    p.daemon = True
+    p.start()
+    
+    processes[user_id] = p
+    atualizar_user(user_id, processo_ativo=1, pid=p.pid)
+    
+    logger.info(f"✅ Processo iniciado para user {user_id} (PID: {p.pid})")
     return True
 
-async def parar_bot(user_id):
-    """Para o bot de um usuário"""
-    if user_id in bot_tasks:
-        bot_tasks[user_id].cancel()
+def parar_processo(user_id):
+    """Para o processo do usuário"""
+    if user_id in processes:
         try:
-            await bot_tasks[user_id]
-        except asyncio.CancelledError:
-            pass
-        del bot_tasks[user_id]
+            p = processes[user_id]
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=5)
+                if p.is_alive():
+                    p.kill()
+            del processes[user_id]
+        except Exception as e:
+            logger.error(f"Erro ao parar processo {user_id}: {e}")
     
-    if user_id in user_bots:
-        try:
-            user_bots[user_id]._desconectar()
-        except:
-            pass
-        del user_bots[user_id]
-    
-    atualizar_user(user_id, bot_ligado=0)
+    atualizar_user(user_id, processo_ativo=0, pid=0, bot_ligado=0)
+    logger.info(f"⏹️ Processo parado para user {user_id}")
 
 # ═══════════════════════════════════════════
 # ESTADOS
@@ -701,13 +606,15 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     res = resultado_dia(user_id)
     taxa = (res['wins']/res['total']*100) if res['total'] > 0 else 0
     
-    await update.message.reply_text(
-        f"⚛️ *STATUS*\n\n🤖 {'🟢 Ligado' if user.get('bot_ligado') else '🔴 Desligado'}\n"
-        f"💰 Saldo: R$ {user.get('saldo', 0):.2f}\n💹 {user.get('iq_conta', 'PRACTICE')}\n\n"
-        f"📊 *Hoje:*\n📈 Ops: {res['total']}\n✅ Wins: {res['wins']}\n❌ Losses: {res['losses']}\n"
-        f"🎯 Taxa: {taxa:.0f}%\n💰 Lucro: R$ {res['lucro']:.2f}",
-        parse_mode="Markdown"
-    )
+    msg = f"⚛️ *STATUS*\n\n"
+    msg += f"🤖 {'🟢 Ligado' if user.get('bot_ligado') else '🔴 Desligado'}\n"
+    msg += f"🔄 {'🟢 Processo ativo' if user.get('processo_ativo') else '⚪ Processo parado'}\n"
+    msg += f"💰 Saldo: R$ {user.get('saldo', 0):.2f}\n"
+    msg += f"💹 {user.get('iq_conta', 'PRACTICE')}\n\n"
+    msg += f"📊 *Hoje:*\n📈 Ops: {res['total']}\n✅ Wins: {res['wins']}\n❌ Losses: {res['losses']}\n"
+    msg += f"🎯 Taxa: {taxa:.0f}%\n💰 Lucro: R$ {res['lucro']:.2f}"
+    
+    await update.message.reply_text(msg, parse_mode="Markdown")
 
 async def cmd_ligar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -725,23 +632,29 @@ async def cmd_ligar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🤖 Bot já está ligado!")
         return
     
-    # Para qualquer instância antiga
-    await parar_bot(user_id)
+    # Para processo antigo se existir
+    parar_processo(user_id)
     
     # Atualiza status
     atualizar_user(user_id, bot_ligado=1)
     
-    # Inicia novo loop
-    await iniciar_bot(user_id, ctx.application)
+    # Inicia novo processo ISOLADO
+    bot_token = BOT_TOKEN
+    sucesso = iniciar_processo(user_id, bot_token)
     
-    await update.message.reply_text(
-        f"✅ *Bot ligado!*\n\n💰 Saldo: R$ {user.get('saldo', 0):.2f}\n🤖 Auto operação ativada\n📊 3/5 = Entra\n\n/parar /status",
-        parse_mode="Markdown"
-    )
+    if sucesso:
+        await update.message.reply_text(
+            f"✅ *Bot ligado!*\n\n💰 Saldo: R$ {user.get('saldo', 0):.2f}\n🤖 Auto operação ativada\n🔄 Processo isolado iniciado\n\n/parar /status",
+            parse_mode="Markdown"
+        )
+    else:
+        atualizar_user(user_id, bot_ligado=0)
+        await update.message.reply_text("❌ Erro ao iniciar processo!")
 
 async def cmd_parar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    await parar_bot(user_id)
+    parar_processo(user_id)
+    atualizar_user(user_id, bot_ligado=0)
     res = resultado_dia(user_id)
     await update.message.reply_text(
         f"🔴 *Bot desligado*\n📊 Hoje: {res['wins']}W/{res['losses']}L | R$ {res['lucro']:.2f}",
@@ -764,8 +677,8 @@ async def cmd_configurar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Conta desativada!")
         return ConversationHandler.END
     
-    # Para o bot antes de reconfigurar
-    await parar_bot(update.effective_user.id)
+    # Para o processo antes de reconfigurar
+    parar_processo(update.effective_user.id)
     
     await update.message.reply_text("⚙️ *Config IQ Option*\n\n📧 Email:", parse_mode="Markdown")
     return CONF_EMAIL
@@ -872,12 +785,14 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     total = len(users)
     ativos = sum(1 for u in users if u['ativo'])
     bots = sum(1 for u in users if u['bot'])
+    processos = sum(1 for u in users if u['processo'])
     
-    texto = f"👑 *PAINEL ADMIN*\n\n📊 Total: {total} | 🟢 {ativos} | 🤖 {bots}\n\n"
+    texto = f"👑 *PAINEL ADMIN*\n\n📊 Total: {total} | 🟢 {ativos} | 🤖 {bots} | 🔄 {processos}\n\n"
     for u in users[:15]:
         s = "🟢" if u['ativo'] else "🔴"
         b = "🤖" if u['bot'] else "💤"
-        texto += f"{s}{b} `{u['id']}` - {u['nome']}\n   📧 {u.get('email','?')}\n\n"
+        p = "🔄" if u['processo'] else "⚪"
+        texto += f"{s}{b}{p} `{u['id']}` - {u['nome']}\n   📧 {u.get('email','?')}\n\n"
     
     texto += "/desativar ID | /listar"
     await update.message.reply_text(texto, parse_mode="Markdown")
@@ -892,8 +807,8 @@ async def cmd_desativar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         target = int(ctx.args[0])
         
-        # Para o bot do usuário
-        await parar_bot(target)
+        # Para o processo do usuário
+        parar_processo(target)
         
         desativar_user(target)
         await update.message.reply_text(f"✅ `{target}` desativado!", parse_mode="Markdown")
@@ -909,7 +824,8 @@ async def cmd_listar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for u in users:
         s = "🟢" if u['ativo'] else "🔴"
         b = "🤖" if u['bot'] else "💤"
-        texto += f"{s}{b} `{u['id']}` {u['nome']}\n"
+        p = "🔄" if u['processo'] else "⚪"
+        texto += f"{s}{b}{p} `{u['id']}` {u['nome']}\n"
     await update.message.reply_text(texto, parse_mode="Markdown")
 
 # ═══════════════════════════════════════════
@@ -918,6 +834,13 @@ async def cmd_listar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 def main():
     init_db()
+    
+    # Limpa processos órfãos
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET processo_ativo=0, pid=0 WHERE processo_ativo=1")
+    conn.commit()
+    conn.close()
+    
     app = Application.builder().token(BOT_TOKEN).build()
     
     conv = ConversationHandler(
@@ -945,10 +868,12 @@ def main():
     app.add_handler(CommandHandler("listar", cmd_listar))
     app.add_handler(conv)
     
-    print(f"\n🤖 Bot Telegram COMPLETO - MULTI-USUÁRIO CORRIGIDO!")
+    print(f"\n🤖 Bot Telegram COMPLETO - MULTI-USUÁRIO COM PROCESSOS ISOLADOS!")
     print(f"👑 Admin ID: {ADMIN_ID}")
     print(f"📝 /start /configurar /ligar /parar /status /admin")
-    print(f"🔄 Conexões isoladas por usuário\n")
+    print(f"🔄 Cada usuário roda em um processo separado")
+    print(f"⚠️  Cada processo é totalmente isolado, sem compartilhamento de estado\n")
+    
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
