@@ -2,9 +2,8 @@
 """
 🤖 QUANTUM IA - Bot Telegram Multi-Usuário COMPLETO
 ⚛️ Trader Professor com Motor de Trading Automático
-👥 Cada usuário opera independente
-✅ TUDO FUNCIONANDO: Config, Painel Admin, Trading Real
-🔧 Datas corrigidas - Verificação de usuário ativo
+👥 Multi-usuário com Painel Admin
+✅ TUDO FUNCIONANDO - Versão Final Corrigida
 """
 
 import asyncio
@@ -23,7 +22,6 @@ from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ConversationHandler, filters, ContextTypes
 )
-from telegram.error import NetworkError, TimedOut
 
 # ═══════════════════════════════════════════
 # CONFIGURAÇÕES
@@ -44,7 +42,7 @@ logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logg
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════
-# BANCO DE DADOS (CORRIGIDO)
+# BANCO DE DADOS
 # ═══════════════════════════════════════════
 
 def init_db():
@@ -52,8 +50,8 @@ def init_db():
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
+            username TEXT DEFAULT '',
+            first_name TEXT DEFAULT '',
             iq_email TEXT DEFAULT '',
             iq_senha TEXT DEFAULT '',
             iq_conta TEXT DEFAULT 'PRACTICE',
@@ -67,9 +65,9 @@ def init_db():
             saldo REAL DEFAULT 0,
             ativo INTEGER DEFAULT 1,
             trial_usado INTEGER DEFAULT 0,
-            expiracao TEXT,
-            cadastro TEXT,
-            ultimo_uso TEXT
+            expiracao TEXT DEFAULT '',
+            cadastro TEXT DEFAULT '',
+            ultimo_uso TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +82,7 @@ def init_db():
     """)
     admin_exp = (datetime.now(FUSO_BR) + timedelta(days=36500)).strftime("%Y-%m-%d %H:%M:%S")
     admin_now = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
-    conn.execute("INSERT OR IGNORE INTO users (user_id, ativo, expiracao, cadastro) VALUES (?, 1, ?, ?)", 
+    conn.execute("INSERT OR IGNORE INTO users (user_id, first_name, ativo, expiracao, cadastro) VALUES (?, 'Admin', 1, ?, ?)", 
                  (ADMIN_ID, admin_exp, admin_now))
     conn.commit()
     conn.close()
@@ -104,14 +102,15 @@ def criar_usuario(user_id, username, first_name):
     exp_str = exp.strftime("%Y-%m-%d %H:%M:%S")
     now_str = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
     
+    if not first_name: first_name = f"User{user_id}"
+    if not username: username = f"user_{user_id}"
+    
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("""INSERT OR IGNORE INTO users (user_id, username, first_name, ativo, trial_usado, expiracao, cadastro) 
-                    VALUES (?,?,?,1,1,?,?)""", (user_id, username or "", first_name or "", exp_str, now_str))
+    conn.execute("""INSERT OR REPLACE INTO users (user_id, username, first_name, ativo, trial_usado, expiracao, cadastro) 
+                    VALUES (?,?,?,1,1,?,?)""", (user_id, username, first_name, exp_str, now_str))
     conn.commit()
     conn.close()
-    
-    u = get_user(user_id)
-    logger.info(f"✅ criar_usuario({user_id}): Trial até {exp_str} | DB ativo={u.get('ativo')} | DB exp={u.get('expiracao')}")
+    logger.info(f"✅ Usuário criado: {user_id} ({first_name}) - Trial até {exp_str}")
 
 def atualizar_user(user_id, **kwargs):
     conn = sqlite3.connect(DB_PATH)
@@ -129,65 +128,58 @@ def ativar_user(user_id, dias=30):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET ativo=1, expiracao=? WHERE user_id=?", (exp_str, user_id))
     conn.commit()
+    
+    c = conn.cursor()
+    c.execute("SELECT ativo, expiracao, first_name FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
     conn.close()
     
-    u = get_user(user_id)
-    logger.info(f"✅ ativar_user({user_id}): Dias={dias} | Exp={exp_str} | DB={u.get('expiracao') if u else 'ERRO'}")
+    if row:
+        logger.info(f"✅ Usuário {user_id} ({row[2]}) ativado até {row[1]} | ativo={row[0]}")
 
 def desativar_user(user_id):
     conn = sqlite3.connect(DB_PATH)
     conn.execute("UPDATE users SET ativo=0, bot_ligado=0 WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
-    logger.info(f"🚫 desativar_user({user_id})")
 
 def user_ativo(user_id):
-    """Verifica se usuário está ativo e não expirado"""
+    """Verifica se usuário está ativo - VERSÃO DIRETA"""
     if user_id == ADMIN_ID:
         return True
     
-    u = get_user(user_id)
-    if not u:
-        logger.info(f"❌ user_ativo({user_id}): Não encontrado")
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT ativo, expiracao FROM users WHERE user_id=?", (user_id,))
+    row = c.fetchone()
+    
+    if not row:
+        conn.close()
         return False
     
-    if not u.get('ativo'):
-        logger.info(f"❌ user_ativo({user_id}): ativo=0")
+    ativo, expiracao = row
+    conn.close()
+    
+    if not ativo:
         return False
     
-    exp_str = u.get('expiracao', '')
-    if not exp_str:
-        logger.info(f"❌ user_ativo({user_id}): Sem expiração")
+    if not expiracao:
         return False
     
     try:
-        # Tenta múltiplos formatos
-        exp = None
-        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]:
-            try:
-                exp = datetime.strptime(exp_str, fmt)
-                break
-            except: continue
-        
-        if not exp:
-            logger.error(f"❌ user_ativo({user_id}): Formato inválido: {exp_str}")
-            return False
-        
+        exp = datetime.strptime(expiracao, "%Y-%m-%d %H:%M:%S")
         agora = datetime.now(FUSO_BR)
-        dias = (exp - agora).days
-        
-        logger.info(f"📅 user_ativo({user_id}): Exp={exp_str} | Agora={agora.strftime('%Y-%m-%d %H:%M:%S')} | Dias={dias}")
         
         if agora > exp:
-            logger.info(f"⏰ user_ativo({user_id}): EXPIRADO! Desativando...")
-            desativar_user(user_id)
+            conn = sqlite3.connect(DB_PATH)
+            conn.execute("UPDATE users SET ativo=0 WHERE user_id=?", (user_id,))
+            conn.commit()
+            conn.close()
             return False
         
-        logger.info(f"✅ user_ativo({user_id}): ATIVO! {dias} dias restantes")
         return True
-        
     except Exception as e:
-        logger.error(f"❌ user_ativo({user_id}): Erro: {e}")
+        logger.error(f"Erro user_ativo({user_id}): {e}")
         return False
 
 def listar_users():
@@ -196,7 +188,7 @@ def listar_users():
     c.execute("SELECT user_id, username, first_name, ativo, expiracao, bot_ligado, saldo, iq_email FROM users ORDER BY cadastro DESC")
     rows = []
     for r in c.fetchall():
-        rows.append({"id": r[0], "user": r[1] or "", "nome": r[2] or "", "ativo": r[3], "exp": r[4] or "", "bot": r[5], "saldo": r[6] or 0, "email": r[7] or ""})
+        rows.append({"id": r[0], "user": r[1] or "", "nome": r[2] or f"User{r[0]}", "ativo": r[3], "exp": r[4] or "", "bot": r[5], "saldo": r[6] or 0, "email": r[7] or ""})
     conn.close()
     return rows
 
@@ -372,9 +364,7 @@ class QuantumIA:
 
 class IQAPI:
     def __init__(self, email, senha, conta='PRACTICE'):
-        self.email = email
-        self.senha = senha
-        self.conta = conta
+        self.email = email; self.senha = senha; self.conta = conta
         self.api = None
         self.velas = {nome: deque(maxlen=100) for nome in ["EURUSD","GBPUSD","EURGBP"]}
         self.ok = False
@@ -390,8 +380,7 @@ class IQAPI:
                 self.ok = True
                 return True, self.api.get_balance()
             return False, 0
-        except Exception as e:
-            return False, str(e)
+        except: return False, 0
 
     def atualizar_velas(self):
         if not self.ok: return
@@ -430,7 +419,6 @@ class IQAPI:
 user_bots = {}
 
 async def trading_loop(user_id, app):
-    """Loop principal de trading para um usuário"""
     logger.info(f"🔄 Trading loop iniciado para user {user_id}")
     
     while True:
@@ -438,8 +426,7 @@ async def trading_loop(user_id, app):
             user = get_user(user_id)
             if not user or not user.get('bot_ligado') or not user_ativo(user_id):
                 logger.info(f"⏹️ Trading loop encerrado para user {user_id}")
-                if user_id in user_bots:
-                    del user_bots[user_id]
+                if user_id in user_bots: del user_bots[user_id]
                 break
             
             res = resultado_dia(user_id)
@@ -534,18 +521,21 @@ async def trading_loop(user_id, app):
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    nome = update.effective_user.first_name
+    nome = update.effective_user.first_name or f"User{user_id}"
+    username = update.effective_user.username or ""
     user = get_user(user_id)
     
     if not user:
-        criar_usuario(user_id, update.effective_user.username, nome)
+        criar_usuario(user_id, username, nome)
         await update.message.reply_text(
             f"👋 Olá, *{nome}*!\n\n🎁 *3 dias grátis!*\n\n"
             f"/configurar - Setup IQ Option\n/ligar - Iniciar bot\n/parar - Parar\n/status - Resultados",
             parse_mode="Markdown"
         )
     else:
+        nome_db = user.get('first_name') or nome
         ativo = user_ativo(user_id)
+        
         if ativo:
             try:
                 exp = datetime.strptime(user.get('expiracao', ''), "%Y-%m-%d %H:%M:%S")
@@ -556,7 +546,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             s = "⛔ Expirado"
         
         await update.message.reply_text(
-            f"👋 *{nome}*\n📊 Plano: {s}\n🤖 Bot: {'🟢' if user.get('bot_ligado') else '🔴'}\n💰 Saldo: R$ {user.get('saldo', 0):.2f}\n\n/status",
+            f"👋 *{nome_db}*\n📊 Plano: {s}\n🤖 Bot: {'🟢' if user.get('bot_ligado') else '🔴'}\n💰 Saldo: R$ {user.get('saldo', 0):.2f}\n\n/status",
             parse_mode="Markdown"
         )
 
@@ -579,7 +569,8 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_ligar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if not user_ativo(user_id): await update.message.reply_text("⛔ Acesso expirado!"); return
+    if not user_ativo(user_id): 
+        await update.message.reply_text("⛔ Acesso expirado! Contate @natanbinario"); return
     
     user = get_user(user_id)
     if not user or not user.get('iq_email'): 
