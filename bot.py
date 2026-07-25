@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-⚛️ QUANTUM IA - Backend COMPLETO
-✅ Canal fixo: https://t.me/+_6C6EMQUg1syODdh
-✅ Railway Ready
+🤖 QUANTUM IA - Bot Telegram Multi-Usuário
+⚛️ Trader Professor Automático
+👥 Cada usuário configura e opera independente
+👑 Painel Admin para gerenciamento
 """
 
 import asyncio
@@ -13,30 +14,28 @@ import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timedelta
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from datetime import datetime, timedelta, timezone
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ConversationHandler, filters, ContextTypes
+)
 
 # ═══════════════════════════════════════════
-# 🇧🇷 HORÁRIO DE BRASÍLIA
+# CONFIGURAÇÕES
 # ═══════════════════════════════════════════
+FUSO_BR = timezone(timedelta(hours=-3))
 os.environ['TZ'] = 'America/Sao_Paulo'
-time.tzset()
 
-# ═══════════════════════════════════════════
-# CONFIGURAÇÕES (VARIÁVEIS DE AMBIENTE)
-# ═══════════════════════════════════════════
-SENHA_ADMIN = os.environ.get('SENHA_ADMIN', 'admin123')
-DB_PATH = "quantum.db"
-TELEGRAM_API_ID = int(os.environ.get('TG_API_ID', '22453120'))
-TELEGRAM_API_HASH = os.environ.get('TG_API_HASH', '89826a4104518e9ed650cdb451ad8b53')
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
+ADMIN_ID = int(os.environ.get('ADMIN_ID', '0'))
+DB_PATH = "quantum_users.db"
 
-# ═══════════════════════════════════════════
-# 🎯 CANAL FIXO (NÃO USA VARIÁVEL)
-# ═══════════════════════════════════════════
-CANAL_LINK = "https://t.me/+_6C6EMQUg1syODdh"
+if not BOT_TOKEN:
+    print("❌ Configure BOT_TOKEN no Railway!")
+    exit(1)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════
@@ -46,19 +45,10 @@ logger = logging.getLogger(__name__)
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE,
-            senha TEXT,
-            nome TEXT,
-            ativo INTEGER DEFAULT 1,
-            expiracao TEXT,
-            admin INTEGER DEFAULT 0,
-            criado_em TEXT,
-            ultimo_login TEXT
-        );
-        CREATE TABLE IF NOT EXISTS config (
-            id INTEGER PRIMARY KEY CHECK (id=1),
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
             iq_email TEXT DEFAULT '',
             iq_senha TEXT DEFAULT '',
             iq_conta TEXT DEFAULT 'PRACTICE',
@@ -68,437 +58,396 @@ def init_db():
             stop_loss REAL DEFAULT 0,
             stop_win REAL DEFAULT 0,
             bot_ligado INTEGER DEFAULT 0,
-            conectado INTEGER DEFAULT 0,
-            saldo REAL DEFAULT 0
+            saldo REAL DEFAULT 0,
+            ativo INTEGER DEFAULT 1,
+            trial_usado INTEGER DEFAULT 0,
+            expiracao TEXT,
+            cadastro TEXT,
+            ultimo_uso TEXT
         );
-        CREATE TABLE IF NOT EXISTS operacoes (
+        CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
             data TEXT,
             ativo TEXT,
             direcao TEXT,
-            expiracao INTEGER,
             valor REAL,
             resultado TEXT,
             lucro REAL
         );
-        CREATE TABLE IF NOT EXISTS logs (
+        CREATE TABLE IF NOT EXISTS admin_log (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             data TEXT,
-            tipo TEXT,
-            mensagem TEXT
+            acao TEXT
         );
     """)
-    conn.execute("INSERT OR IGNORE INTO config (id) VALUES (1)")
     # Admin principal
-    conn.execute("INSERT OR IGNORE INTO usuarios (email, senha, nome, ativo, admin, expiracao, criado_em) VALUES (?,?,?,1,1,?,?)",
-                 ('natanbinario810@gmail.com', SENHA_ADMIN, 'Natan', '2099-12-31 23:59:59', datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+    conn.execute("INSERT OR IGNORE INTO users (user_id, ativo, expiracao, cadastro) VALUES (?, 1, '2099-12-31', datetime('now','localtime'))", (ADMIN_ID,))
     conn.commit()
     conn.close()
 
-# ═══════════════════════════════════════════
-# FUNÇÕES DE USUÁRIO
-# ═══════════════════════════════════════════
-
-def criar_usuario(email, nome, dias=3):
-    exp = (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d %H:%M:%S")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        conn.execute("INSERT INTO usuarios (email, senha, nome, ativo, expiracao, criado_em) VALUES (?,?,?,1,?,?)",
-                     (email, '123456', nome, exp, now))
-        conn.commit()
-        conn.close()
-        return True, "Usuário criado!"
-    except sqlite3.IntegrityError:
-        conn.close()
-        return False, "Email já cadastrado"
-
-def validar_usuario(email, senha):
+def get_user(user_id):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT * FROM usuarios WHERE email=? AND senha=? AND ativo=1", (email, senha))
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     row = c.fetchone()
-    if not row:
-        conn.close()
-        return False, "Email ou senha inválidos"
-    
-    cols = [d[0] for d in c.description]
-    user = dict(zip(cols, row))
-    
-    if not user['admin']:
-        try:
-            exp = datetime.strptime(user['expiracao'], "%Y-%m-%d %H:%M:%S")
-            if datetime.now() > exp:
-                c.execute("UPDATE usuarios SET ativo=0 WHERE email=?", (email,))
-                conn.commit()
-                conn.close()
-                return False, "Acesso expirado"
-        except:
-            conn.close()
-            return False, "Erro na data"
-    
-    c.execute("UPDATE usuarios SET ultimo_login=? WHERE email=?", (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), email))
-    conn.commit()
+    cols = [d[0] for d in c.description] if c.description else []
     conn.close()
-    return True, user
+    return dict(zip(cols, row)) if row else None
 
-def ativar_usuario(email, dias=30):
-    exp = (datetime.now() + timedelta(days=dias)).strftime("%Y-%m-%d %H:%M:%S")
+def criar_usuario(user_id, username, first_name):
+    exp = (datetime.now(FUSO_BR) + timedelta(days=3)).strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE usuarios SET ativo=1, expiracao=? WHERE email=?", (exp, email))
+    conn.execute("""INSERT OR IGNORE INTO users (user_id, username, first_name, ativo, trial_usado, expiracao, cadastro) 
+                    VALUES (?,?,?,1,1,?,?)""", (user_id, username or "", first_name or "", exp, now))
     conn.commit()
     conn.close()
 
-def desativar_usuario(email):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("UPDATE usuarios SET ativo=0 WHERE email=?", (email,))
-    conn.commit()
-    conn.close()
-
-def listar_usuarios():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT id, email, nome, ativo, expiracao, admin, criado_em, ultimo_login FROM usuarios ORDER BY criado_em DESC")
-    rows = c.fetchall()
-    cols = [d[0] for d in c.description]
-    conn.close()
-    return [dict(zip(cols, r)) for r in rows]
-
-# ═══════════════════════════════════════════
-# FUNÇÕES AUXILIARES
-# ═══════════════════════════════════════════
-
-def get_config():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM config WHERE id=1")
-    row = c.fetchone()
-    cols = [d[0] for d in c.description]
-    conn.close()
-    return dict(zip(cols, row)) if row else {}
-
-def update_config(**kwargs):
+def atualizar_user(user_id, **kwargs):
     conn = sqlite3.connect(DB_PATH)
     sets = ", ".join(f"{k}=?" for k in kwargs)
-    vals = list(kwargs.values())
-    conn.execute(f"UPDATE config SET {sets} WHERE id=1", vals)
+    vals = list(kwargs.values()) + [user_id]
+    conn.execute(f"UPDATE users SET {sets} WHERE user_id=?", vals)
     conn.commit()
     conn.close()
 
-def add_log(tipo, msg):
+def ativar_user(user_id, dias=30):
+    exp = (datetime.now(FUSO_BR) + timedelta(days=dias)).strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(DB_PATH)
-    conn.execute("INSERT INTO logs (data, tipo, mensagem) VALUES (?,?,?)", 
-                 (datetime.now().strftime("%H:%M:%S"), tipo, msg))
+    conn.execute("UPDATE users SET ativo=1, expiracao=? WHERE user_id=?", (exp, user_id))
     conn.commit()
     conn.close()
-    logger.info(f"[{tipo}] {msg}")
 
-def get_logs(limit=50):
+def desativar_user(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("UPDATE users SET ativo=0, bot_ligado=0 WHERE user_id=?", (user_id,))
+    conn.commit()
+    conn.close()
+
+def user_ativo(user_id):
+    u = get_user(user_id)
+    if not u or not u['ativo']: return False
+    try:
+        exp = datetime.strptime(u['expiracao'], "%Y-%m-%d %H:%M:%S")
+        if datetime.now(FUSO_BR) > exp:
+            desativar_user(user_id)
+            return False
+    except: return False
+    return True
+
+def listar_users():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("SELECT data, tipo, mensagem FROM logs ORDER BY id DESC LIMIT ?", (limit,))
-    rows = [{"hora": r[0], "tipo": r[1], "msg": r[2]} for r in c.fetchall()]
+    c.execute("SELECT user_id, username, first_name, ativo, expiracao, bot_ligado, saldo FROM users ORDER BY cadastro DESC")
+    rows = [{"id": r[0], "user": r[1] or "", "nome": r[2] or "", "ativo": r[3], "exp": r[4] or "", "bot": r[5], "saldo": r[6]} for r in c.fetchall()]
     conn.close()
     return rows
 
-def resultado_hoje():
-    hoje = datetime.now().strftime("%Y-%m-%d")
+def salvar_trade(user_id, ativo, direcao, valor, resultado, lucro):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("INSERT INTO trades (user_id, data, ativo, direcao, valor, resultado, lucro) VALUES (?,?,?,?,?,?,?)",
+                 (user_id, datetime.now(FUSO_BR).strftime("%Y-%m-%d %H:%M:%S"), ativo, direcao, valor, resultado, lucro))
+    conn.commit()
+    conn.close()
+
+def resultado_dia(user_id):
+    hoje = datetime.now(FUSO_BR).strftime("%Y-%m-%d")
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""SELECT COUNT(*), 
-                        SUM(CASE WHEN resultado='win' THEN 1 ELSE 0 END), 
-                        SUM(CASE WHEN resultado='loss' THEN 1 ELSE 0 END), 
-                        SUM(lucro) 
-                 FROM operacoes WHERE data LIKE ?""", (f"{hoje}%",))
+    c.execute("""SELECT COUNT(*), SUM(CASE WHEN resultado='win' THEN 1 ELSE 0 END), 
+                        SUM(CASE WHEN resultado='loss' THEN 1 ELSE 0 END), SUM(lucro) 
+                 FROM trades WHERE user_id=? AND data LIKE ?""", (user_id, f"{hoje}%"))
     t, w, l, lc = c.fetchone()
     conn.close()
     return {"total": t or 0, "wins": w or 0, "losses": l or 0, "lucro": lc or 0.0}
 
-def salvar_operacao(ativo, direcao, expiracao, valor, resultado, lucro):
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""INSERT INTO operacoes (data, ativo, direcao, expiracao, valor, resultado, lucro) 
-                    VALUES (?,?,?,?,?,?,?)""",
-                 (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ativo, direcao, expiracao, valor, resultado, lucro))
-    conn.commit()
-    conn.close()
-
 # ═══════════════════════════════════════════
-# PARSER DE SINAL
+# BOT DO USUÁRIO (TRADER PROFESSOR)
 # ═══════════════════════════════════════════
 
-def parse_sinal(texto):
-    if "SINAL" not in texto.upper() and "QUANTUM" not in texto.upper():
-        return None
-    s = {}
-    m = re.search(r'Hor[áa]rio[:\s]+(\d{1,2}:\d{2})', texto)
-    if m: s["horario"] = m.group(1)
-    m = re.search(r'Ativo[:\s]+([\w\-\/]+)', texto)
-    if m: s["ativo"] = m.group(1).strip()
-    if "CALL" in texto.upper(): s["direcao"] = "call"
-    elif "PUT" in texto.upper(): s["direcao"] = "put"
-    m = re.search(r'Expira[çc][aã]o[:\s]+M?(\d+)', texto, re.IGNORECASE)
-    s["expiracao"] = int(m.group(1)) if m else 1
-    m = re.search(r'(\d+)\s+recupera[çc][aã]o', texto, re.IGNORECASE)
-    s["gales"] = int(m.group(1)) if m else 0
-    return s if ("ativo" in s and "direcao" in s) else None
-
-# ═══════════════════════════════════════════
-# OPERADOR IQ OPTION
-# ═══════════════════════════════════════════
-
-class IQOperador:
-    def __init__(self):
+class UserBot:
+    def __init__(self, user_id):
+        self.user_id = user_id
         self.api = None
+        self.rodando = False
+        self.lucro_dia = 0.0
+        self.wins = 0
+        self.losses = 0
+        self.ops = 0
 
     def conectar(self):
         from iqoptionapi.stable_api import IQ_Option
-        cfg = get_config()
-        if not cfg.get('iq_email') or not cfg.get('iq_senha'):
-            return False
+        u = get_user(self.user_id)
+        if not u or not u.get('iq_email'): return False
+        
         try:
-            self.api = IQ_Option(cfg['iq_email'], cfg['iq_senha'])
+            self.api = IQ_Option(u['iq_email'], u['iq_senha'])
             ok, _ = self.api.connect()
             if ok:
-                self.api.change_balance(cfg.get('iq_conta', 'PRACTICE'))
+                self.api.change_balance(u.get('iq_conta', 'PRACTICE'))
                 saldo = self.api.get_balance()
-                update_config(conectado=1, saldo=saldo)
-                add_log("OK", f"✅ Conectado! Saldo: R$ {saldo:.2f}")
+                atualizar_user(self.user_id, saldo=saldo)
                 return True
             return False
-        except:
-            return False
+        except: return False
 
-    def operar(self, sinal):
-        cfg = get_config()
-        if not cfg.get('bot_ligado'): return
+    def operar(self, ativo, direcao, exp=1):
+        u = get_user(self.user_id)
+        if not u: return
         
-        ativo = sinal["ativo"]
-        direcao = sinal["direcao"]
-        exp = sinal.get("expiracao", 1)
-        valor = cfg['valor_entrada']
-        max_gales = min(sinal.get("gales", 0), cfg['max_gales'])
+        valor = u.get('valor_entrada', 2.0)
+        max_gales = u.get('max_gales', 1)
+        multiplicador = u.get('multiplicador', 2.0)
         
-        res = resultado_hoje()
-        if cfg['stop_loss'] > 0 and res['lucro'] <= -cfg['stop_loss']:
-            add_log("AVISO", f"🛑 Stop Loss R$ {res['lucro']:.2f}")
-            update_config(bot_ligado=0)
-            return
-        if cfg['stop_win'] > 0 and res['lucro'] >= cfg['stop_win']:
-            add_log("AVISO", f"🏆 Stop Win R$ {res['lucro']:.2f}")
-            update_config(bot_ligado=0)
-            return
-        
-        tentativa = 0
-        while tentativa <= max_gales:
-            val = round(valor * (cfg['multiplicador'] ** tentativa), 2)
+        for tentativa in range(max_gales + 1):
+            val = round(valor * (multiplicador ** tentativa), 2)
             try:
                 saldo_antes = self.api.get_balance()
-                ok, id_op = self.api.buy(val, ativo, direcao, exp)
-                if not ok: break
-                time.sleep(exp * 60 + 5)
+                ok, _ = self.api.buy(val, ativo, direcao, exp)
+                if not ok: continue
+                
+                time.sleep(65)  # Aguarda M1
                 saldo_depois = self.api.get_balance()
                 lucro = saldo_depois - saldo_antes
                 
                 if lucro > 0:
-                    salvar_operacao(ativo, direcao, exp, val, "win", abs(lucro))
-                    add_log("WIN", f"✅ {ativo} {direcao.upper()} +R$ {abs(lucro):.2f}")
-                    update_config(saldo=saldo_depois)
-                    break
+                    self.wins += 1; self.ops += 1; self.lucro_dia += lucro
+                    salvar_trade(self.user_id, ativo, direcao, val, "win", abs(lucro))
+                    atualizar_user(self.user_id, saldo=saldo_depois)
+                    return "WIN", abs(lucro), tentativa
                 elif lucro < 0:
-                    salvar_operacao(ativo, direcao, exp, val, "loss", -val)
-                    add_log("LOSS", f"❌ {ativo} {direcao.upper()} -R$ {val:.2f}")
-                    tentativa += 1
+                    if tentativa < max_gales: continue
+                    self.losses += 1; self.ops += 1; self.lucro_dia -= val
+                    salvar_trade(self.user_id, ativo, direcao, val, "loss", -val)
+                    atualizar_user(self.user_id, saldo=saldo_depois)
+                    return "LOSS", val, tentativa
                 else:
-                    break
-            except Exception as e:
-                add_log("ERRO", f"Erro: {str(e)[:50]}")
-                break
-        try: update_config(saldo=self.api.get_balance())
-        except: pass
-
-# ═══════════════════════════════════════════
-# LISTENER DE SINAIS
-# ═══════════════════════════════════════════
-
-def run_listener():
-    async def _run():
-        from telethon import TelegramClient, events
-        from telethon.sessions import StringSession
-        from telethon.tl.functions.messages import ImportChatInviteRequest
-        from telethon.tl.types import Channel, Chat
+                    return "EMPATE", 0, tentativa
+            except: continue
         
-        session_str = os.environ.get('TG_SESSION_STRING', '')
-        session = StringSession(session_str) if session_str else "quantum_session"
-        
-        add_log("INFO", "🔄 Conectando Telegram...")
-        
-        async with TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH) as client:
-            add_log("INFO", "✅ Telegram conectado!")
-            
-            entity = None
-            invite = CANAL_LINK.strip("/").split("+")[-1]
-            
-            try:
-                result = await client(ImportChatInviteRequest(invite))
-                entity = result.chats[0]
-            except Exception as e:
-                if "already" in str(e).lower():
-                    # Procura especificamente pelo canal correto
-                    async for d in client.iter_dialogs():
-                        t = getattr(d.entity, 'title', '') or ''
-                        if 'quantum' in t.lower() or 'ia' in t.lower() or 'sinais' in t.lower():
-                            entity = d.entity
-                            break
-                    if not entity:
-                        async for d in client.iter_dialogs():
-                            if isinstance(d.entity, (Channel, Chat)):
-                                entity = d.entity
-                                break
-
-            if not entity:
-                add_log("ERRO", "Canal não encontrado! Verifique o link.")
-                return
-
-            add_log("INFO", f"👀 Escutando: {getattr(entity, 'title', 'canal')}")
-
-            @client.on(events.NewMessage(chats=entity))
-            async def handler(event):
-                texto = event.message.text or ""
-                sinal = parse_sinal(texto)
-                if not sinal: return
-                
-                cfg = get_config()
-                if not cfg.get('bot_ligado'): return
-
-                add_log("SINAL", f"📡 {sinal.get('ativo')} {sinal.get('direcao','').upper()} M{sinal.get('expiracao')}")
-                
-                if sinal.get("horario"):
-                    agora = datetime.now()
-                    h, m = map(int, sinal["horario"].split(":"))
-                    alvo = agora.replace(hour=h, minute=m, second=0, microsecond=0)
-                    if alvo < agora: alvo += timedelta(days=1)
-                    diff = (alvo - agora).total_seconds()
-                    if 0 < diff <= 600:
-                        await asyncio.sleep(max(diff - 1, 0))
-
-                operador = IQOperador()
-                if operador.conectar():
-                    operador.operar(sinal)
-
-            await client.run_until_disconnected()
-
-    asyncio.run(_run())
+        return "ERRO", 0, 0
 
 # ═══════════════════════════════════════════
-# API FLASK
+# HANDLERS DO BOT
 # ═══════════════════════════════════════════
 
-app = Flask(__name__)
-CORS(app)
+# Estados da configuração
+(CONF_EMAIL, CONF_SENHA, CONF_CONTA, CONF_VALOR, CONF_MULTI, CONF_GALES, CONF_SL, CONF_SW) = range(8)
 
-@app.route('/')
-def home():
-    return jsonify({"status": "online", "app": "Quantum IA", "versao": "3.0"})
-
-@app.route('/api/status', methods=['GET'])
-def status():
-    cfg = get_config()
-    res = resultado_hoje()
-    logs = get_logs(15)
-    return jsonify({
-        "bot_ligado": bool(cfg.get('bot_ligado', 0)),
-        "conectado": bool(cfg.get('conectado', 0)),
-        "saldo": cfg.get('saldo', 0),
-        "hoje": res,
-        "config": {
-            "email": cfg.get('iq_email', ''),
-            "conta": cfg.get('iq_conta', 'PRACTICE'),
-            "valor_entrada": cfg.get('valor_entrada', 2.0),
-            "multiplicador": cfg.get('multiplicador', 2.0),
-            "max_gales": cfg.get('max_gales', 1),
-            "stop_loss": cfg.get('stop_loss', 0),
-            "stop_win": cfg.get('stop_win', 0),
-        },
-        "logs": logs
-    })
-
-@app.route('/api/config', methods=['POST'])
-def config():
-    data = request.json
-    update_config(**data)
-    add_log("INFO", "⚙️ Configurações atualizadas")
-    return jsonify({"status": "ok"})
-
-@app.route('/api/ligar', methods=['POST'])
-def ligar():
-    cfg = get_config()
-    if not cfg.get('iq_email'):
-        return jsonify({"status": "erro", "msg": "Configure a IQ Option primeiro!"}), 400
-    update_config(bot_ligado=1)
-    add_log("INFO", "▶️ Bot ligado")
-    return jsonify({"status": "ok"})
-
-@app.route('/api/desligar', methods=['POST'])
-def desligar():
-    update_config(bot_ligado=0)
-    add_log("INFO", "⏹️ Bot desligado")
-    return jsonify({"status": "ok"})
-
-@app.route('/api/logs', methods=['GET'])
-def logs():
-    return jsonify(get_logs(100))
-
-@app.route('/api/historico', methods=['GET'])
-def historico():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT data, ativo, direcao, expiracao, valor, resultado, lucro FROM operacoes ORDER BY id DESC LIMIT 50")
-    rows = [{"data": r[0], "ativo": r[1], "direcao": r[2], "expiracao": r[3], "valor": r[4], "resultado": r[5], "lucro": r[6]} for r in c.fetchall()]
-    conn.close()
-    return jsonify(rows)
-
-@app.route('/api/admin/usuarios', methods=['GET'])
-def admin_usuarios():
-    return jsonify(listar_usuarios())
-
-@app.route('/api/admin/ativar', methods=['POST'])
-def admin_ativar():
-    data = request.json
-    email = data.get('email', '')
-    dias = data.get('dias', 30)
-    if not email: return jsonify({"status": "erro", "msg": "Email obrigatório"}), 400
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    nome = update.effective_user.first_name
+    user = get_user(user_id)
     
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM usuarios WHERE email=?", (email,))
-    row = c.fetchone()
-    
-    if row:
-        ativar_usuario(email, dias)
+    if not user:
+        criar_usuario(user_id, update.effective_user.username, nome)
+        await update.message.reply_text(
+            f"👋 Olá, *{nome}*!\n\n"
+            f"🎁 *3 dias grátis!*\n\n"
+            f"📋 *Comandos:*\n"
+            f"/configurar - Setup IQ Option\n"
+            f"/ligar - Iniciar bot\n"
+            f"/parar - Parar bot\n"
+            f"/status - Ver resultados\n"
+            f"/ajuda - Todos comandos",
+            parse_mode="Markdown"
+        )
     else:
-        nome = email.split('@')[0]
-        criar_usuario(email, nome, dias)
+        exp = user.get('expiracao', '')
+        try:
+            d = (datetime.strptime(exp, "%Y-%m-%d %H:%M:%S") - datetime.now(FUSO_BR)).days
+            s = f"✅ {d} dias restantes" if user['ativo'] else "⛔ Expirado"
+        except: s = "⛔ Expirado"
+        
+        await update.message.reply_text(
+            f"👋 *{nome}*\n📊 Plano: {s}\n🤖 Bot: {'🟢' if user.get('bot_ligado') else '🔴'}\n💰 Saldo: R$ {user.get('saldo', 0):.2f}\n\n/status para detalhes",
+            parse_mode="Markdown"
+        )
+
+async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    if not user: await update.message.reply_text("❌ Use /start primeiro"); return
     
-    conn.close()
-    add_log("INFO", f"👤 {email} ativado por {dias} dias")
-    return jsonify({"status": "ok", "msg": f"{email} ativado por {dias} dias!"})
+    res = resultado_dia(user_id)
+    taxa = (res['wins']/res['total']*100) if res['total'] > 0 else 0
+    
+    await update.message.reply_text(
+        f"⚛️ *QUANTUM IA - STATUS*\n\n"
+        f"🤖 Bot: {'🟢 Ligado' if user.get('bot_ligado') else '🔴 Desligado'}\n"
+        f"💰 Saldo: R$ {user.get('saldo', 0):.2f}\n"
+        f"💹 Conta: {user.get('iq_conta', 'PRACTICE')}\n\n"
+        f"📊 *Hoje:*\n"
+        f"📈 Ops: {res['total']}\n"
+        f"✅ Wins: {res['wins']}\n"
+        f"❌ Losses: {res['losses']}\n"
+        f"🎯 Taxa: {taxa:.0f}%\n"
+        f"💰 Lucro: R$ {res['lucro']:.2f}\n\n"
+        f"⚙️ Entrada: R$ {user.get('valor_entrada', 2.0)}\n"
+        f"🔄 Gale: {user.get('multiplicador', 2.0)}x ({user.get('max_gales', 1)})\n"
+        f"🛑 Stop L: R$ {user.get('stop_loss', 0)} | Stop W: R$ {user.get('stop_win', 0)}",
+        parse_mode="Markdown"
+    )
 
-@app.route('/api/admin/desativar', methods=['POST'])
-def admin_desativar():
-    data = request.json
-    email = data.get('email', '')
-    if not email: return jsonify({"status": "erro"}), 400
-    desativar_usuario(email)
-    add_log("INFO", f"🚫 {email} desativado")
-    return jsonify({"status": "ok"})
+async def cmd_configurar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not user_ativo(update.effective_user.id):
+        await update.message.reply_text("⛔ Acesso expirado! Contate o administrador."); return ConversationHandler.END
+    await update.message.reply_text("⚙️ *Configuração IQ Option*\n\n📧 Digite seu email:", parse_mode="Markdown")
+    return CONF_EMAIL
+
+async def conf_email(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['email'] = update.message.text.strip()
+    await update.message.reply_text("🔒 Digite sua senha:", parse_mode="Markdown")
+    return CONF_SENHA
+
+async def conf_senha(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data['senha'] = update.message.text.strip()
+    kb = [[InlineKeyboardButton("🎯 DEMO", callback_data="conta_PRACTICE"), InlineKeyboardButton("💰 REAL", callback_data="conta_REAL")]]
+    await update.message.reply_text("📊 Tipo de conta:", reply_markup=InlineKeyboardMarkup(kb))
+    return CONF_CONTA
+
+async def conf_conta(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    ctx.user_data['conta'] = q.data.replace("conta_", "")
+    await q.edit_message_text(f"✅ Conta: {ctx.user_data['conta']}\n\n💰 Valor de entrada (R$):\nEx: 2.00", parse_mode="Markdown")
+    return CONF_VALOR
+
+async def conf_valor(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try: ctx.user_data['valor'] = float(update.message.text.strip().replace(',','.'))
+    except: await update.message.reply_text("❌ Inválido"); return CONF_VALOR
+    await update.message.reply_text("🔄 Multiplicador do Gale:\nEx: 2.0 (dobra)")
+    return CONF_MULTI
+
+async def conf_multi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try: ctx.user_data['multi'] = float(update.message.text.strip().replace(',','.'))
+    except: await update.message.reply_text("❌ Inválido"); return CONF_MULTI
+    await update.message.reply_text("🎯 Máximo de Gales:\nEx: 1")
+    return CONF_GALES
+
+async def conf_gales(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try: ctx.user_data['gales'] = int(update.message.text.strip())
+    except: await update.message.reply_text("❌ Inválido"); return CONF_GALES
+    await update.message.reply_text("🛑 Stop Loss (R$):\n0 = desativado")
+    return CONF_SL
+
+async def conf_sl(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try: ctx.user_data['sl'] = float(update.message.text.strip().replace(',','.'))
+    except: await update.message.reply_text("❌ Inválido"); return CONF_SL
+    await update.message.reply_text("🏆 Stop Win (R$):\n0 = desativado")
+    return CONF_SW
+
+async def conf_sw(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try: ctx.user_data['sw'] = float(update.message.text.strip().replace(',','.'))
+    except: await update.message.reply_text("❌ Inválido"); return CONF_SW
+    
+    d = ctx.user_data
+    atualizar_user(user_id, iq_email=d['email'], iq_senha=d['senha'], iq_conta=d['conta'],
+                   valor_entrada=d['valor'], multiplicador=d['multi'], max_gales=d['gales'],
+                   stop_loss=d['sl'], stop_win=d['sw'])
+    
+    await update.message.reply_text(
+        f"✅ *Configuração salva!*\n\n"
+        f"📧 {d['email']}\n📊 {d['conta']}\n"
+        f"💰 R$ {d['valor']}\n🔄 {d['multi']}x (max {d['gales']})\n"
+        f"🛑 Stop L: R$ {d['sl']}\n🏆 Stop W: R$ {d['sw']}\n\n"
+        f"Use /ligar para iniciar!",
+        parse_mode="Markdown"
+    )
+    return ConversationHandler.END
+
+async def cmd_ligar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not user_ativo(user_id): await update.message.reply_text("⛔ Acesso expirado!"); return
+    user = get_user(user_id)
+    if not user or not user.get('iq_email'): await update.message.reply_text("❌ Use /configurar primeiro"); return
+    
+    await update.message.reply_text("⏳ Conectando à IQ Option...")
+    bot = UserBot(user_id)
+    if bot.conectar():
+        atualizar_user(user_id, bot_ligado=1)
+        await update.message.reply_text(f"✅ *Bot ligado!*\n💰 Saldo: R$ {user.get('saldo', 0):.2f}\n🤖 Auto operação ativada\n\nUse /parar para desligar", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Erro ao conectar! Verifique email/senha.")
+
+async def cmd_parar(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    atualizar_user(user_id, bot_ligado=0)
+    res = resultado_dia(user_id)
+    await update.message.reply_text(f"🔴 *Bot desligado*\n📊 Hoje: {res['wins']}W/{res['losses']}L | R$ {res['lucro']:.2f}", parse_mode="Markdown")
+
+async def cmd_ajuda(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📚 *COMANDOS*\n\n"
+        "/start - Iniciar\n"
+        "/configurar - Setup IQ Option\n"
+        "/ligar - Ligar bot\n"
+        "/parar - Parar bot\n"
+        "/status - Ver status\n"
+        "/admin - Painel admin (só ADM)\n"
+        "/ajuda - Esta mensagem",
+        parse_mode="Markdown"
+    )
 
 # ═══════════════════════════════════════════
-# INICIAR
+# PAINEL ADMIN
 # ═══════════════════════════════════════════
+
+async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID: await update.message.reply_text("⛔ Acesso negado!"); return
+    
+    users = listar_users()
+    texto = "👑 *PAINEL ADMIN*\n\n"
+    
+    for u in users[:10]:
+        s = "🟢" if u['ativo'] else "🔴"
+        b = "🤖" if u['bot'] else "💤"
+        exp = (u['exp'] or '')[:10]
+        texto += f"{s}{b} `{u['id']}` {u['nome']}\n   Exp: {exp} | R$ {u['saldo']:.2f}\n\n"
+    
+    kb = [[InlineKeyboardButton("➕ Ativar Usuário", callback_data="adm_ativar"),
+           InlineKeyboardButton("➖ Desativar", callback_data="adm_desativar")]]
+    
+    await update.message.reply_text(texto, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
+
+# ═══════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════
+
+def main():
+    init_db()
+    logger.info("✅ Banco iniciado")
+    
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    # Configuração
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("configurar", cmd_configurar)],
+        states={
+            CONF_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_email)],
+            CONF_SENHA: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_senha)],
+            CONF_CONTA: [CallbackQueryHandler(conf_conta, pattern="^conta_")],
+            CONF_VALOR: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_valor)],
+            CONF_MULTI: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_multi)],
+            CONF_GALES: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_gales)],
+            CONF_SL: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_sl)],
+            CONF_SW: [MessageHandler(filters.TEXT & ~filters.COMMAND, conf_sw)],
+        },
+        fallbacks=[CommandHandler("cancelar", lambda u, c: ConversationHandler.END)],
+    )
+    
+    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("ligar", cmd_ligar))
+    app.add_handler(CommandHandler("parar", cmd_parar))
+    app.add_handler(CommandHandler("ajuda", cmd_ajuda))
+    app.add_handler(CommandHandler("admin", cmd_admin))
+    app.add_handler(conv)
+    
+    logger.info("🚀 Bot iniciado!")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    init_db()
-    add_log("INFO", "🚀 Sistema iniciado")
-    threading.Thread(target=run_listener, daemon=True).start()
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    main()
