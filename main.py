@@ -15,11 +15,9 @@ API_HASH = os.getenv('TG_API_HASH')
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 CHANNEL_ID = int(os.getenv('CHANNEL_ID', 0))
 
-# Caminhos para o Volume do Railway
 DB_PATH = '/app/data/users.db' if os.path.exists('/app/data') else 'users.db'
 SESSION_PATH = '/app/data/monitor_session' if os.path.exists('/app/data') else 'monitor_session'
 
-# --- BANCO DE DADOS ---
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
@@ -33,7 +31,6 @@ def init_db():
 conn = init_db()
 cursor = conn.cursor()
 
-# --- LÓGICA DE TRADE ---
 async def execute_trade_with_gale(email, password, signal, value, mode):
     try:
         api = IQ_Option(email, password)
@@ -45,13 +42,12 @@ async def execute_trade_with_gale(email, password, signal, value, mode):
         status, id = api.buy(value, signal['ativo'], signal['direcao'], signal['exp'])
         if status:
             resultado = api.check_win_v3(id)
-            if resultado < 0: # LOSS -> GALE 1
+            if resultado < 0:
                 api.buy(value * 2.0, signal['ativo'], signal['direcao'], signal['exp'])
         api.api.close()
     except Exception as e:
         logging.error(f"Erro trade: {e}")
 
-# --- PARSER ---
 def parse_quantum_signal(text):
     try:
         ativo = re.search(r"Ativo: ([\w-]+)", text).group(1).strip()
@@ -61,7 +57,6 @@ def parse_quantum_signal(text):
     except:
         return None
 
-# --- BOT HANDLERS ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
@@ -69,7 +64,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("Configurar", callback_data="config")],
           [InlineKeyboardButton("Real", callback_data="mode_REAL"), InlineKeyboardButton("Demo", callback_data="mode_PRACTICE")],
           [InlineKeyboardButton("LIGAR", callback_data="on"), InlineKeyboardButton("DESLIGAR", callback_data="off")]]
-    await update.message.reply_text("🤖 **Quantum IA Bot**", reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown")
+    await update.message.reply_text("🤖 Painel Quantum IA", reply_markup=InlineKeyboardMarkup(kb))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -81,9 +76,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m = query.data.split("_")[1]
         cursor.execute("UPDATE users SET account_type = ? WHERE user_id = ?", (m, uid))
     elif query.data == "config":
-        await query.message.reply_text("Envie seu login no formato: email;senha;valor")
+        await query.message.reply_text("Envie: email;senha;valor")
     conn.commit()
-    await query.edit_message_text("✅ Configurações atualizadas!")
+    await query.edit_message_text("✅ Atualizado!")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -92,26 +87,26 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p = update.message.text.split(";")
             cursor.execute("UPDATE users SET email=?, password=?, value=? WHERE user_id=?", (p[0], p[1], float(p[2]), uid))
             conn.commit()
-            await update.message.reply_text("✅ Dados salvos!")
-        except: await update.message.reply_text("❌ Formato inválido.")
+            await update.message.reply_text("✅ Salvo!")
+        except: await update.message.reply_text("❌ Erro")
 
-# --- INICIALIZAÇÃO CORRIGIDA ---
-async def main():
-    # 1. Configura a Application do Bot
+async def run_bot():
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-
-    # 2. Inicializa os drivers (Corrige o seu erro)
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
     
-    # 3. Inicia o Monitor de Sinais do Telegram
+    # O bloco 'async with' inicializa a aplicação automaticamente
+    async with application:
+        await application.start()
+        await application.updater.start_polling()
+        while True:
+            await asyncio.sleep(3600)
+
+async def main():
     tg_client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
     await tg_client.start()
-    logging.info("Monitor de Sinais ONLINE!")
+    logging.info("Monitor Telethon Online!")
 
     @tg_client.on(events.NewMessage(chats=CHANNEL_ID))
     async def msg_handler(event):
@@ -121,8 +116,13 @@ async def main():
             for u in cursor.fetchall():
                 asyncio.create_task(execute_trade_with_gale(u[0], u[1], s, u[2], u[3]))
 
-    # Mantém o script rodando
-    await tg_client.run_until_disconnected()
+    await asyncio.gather(
+        run_bot(),
+        tg_client.run_until_disconnected()
+    )
 
 if __name__ == '__main__':
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
