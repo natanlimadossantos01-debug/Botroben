@@ -31,23 +31,41 @@ def init_db():
 conn = init_db()
 cursor = conn.cursor()
 
-async def execute_trade_with_gale(email, password, signal, value, mode):
+# --- FUNÇÃO DE TRADE COM AVISOS NO TELEGRAM ---
+async def execute_trade_with_alerts(bot, user_id, email, password, signal, value, mode):
     try:
         api = IQ_Option(email, password)
         check, reason = api.connect()
         if not check:
-            logging.error(f"Erro login {email}: {reason}")
+            await bot.send_message(chat_id=user_id, text=f"❌ Erro ao conectar na IQ Option: {reason}")
             return
+        
         api.change_balance(mode)
+        await bot.send_message(chat_id=user_id, text=f"🚀 **Entrada 1 Enviada!**\nAtivo: {signal['ativo']}\nValor: R$ {value}")
+        
         status, id = api.buy(value, signal['ativo'], signal['direcao'], signal['exp'])
+        
         if status:
             resultado = api.check_win_v3(id)
-            if resultado < 0:
-                api.buy(value * 2.0, signal['ativo'], signal['direcao'], signal['exp'])
+            if resultado < 0: # LOSS
+                await bot.send_message(chat_id=user_id, text=f"⚠️ Loss na 1ª entrada. **Iniciando Gale 1...**")
+                valor_gale = value * 2.0
+                status_g, id_g = api.buy(valor_gale, signal['ativo'], signal['direcao'], signal['exp'])
+                
+                if status_g:
+                    res_g = api.check_win_v3(id_g)
+                    msg = "✅ **WIN NO GALE!**" if res_g > 0 else "❌ **LOSS NO GALE.**"
+                    await bot.send_message(chat_id=user_id, text=msg)
+            else:
+                await bot.send_message(chat_id=user_id, text=f"✅ **WIN DE PRIMEIRA!**")
+        else:
+            await bot.send_message(chat_id=user_id, text=f"❌ Erro ao abrir ordem: {id}")
+        
         api.api.close()
     except Exception as e:
-        logging.error(f"Erro trade: {e}")
+        await bot.send_message(chat_id=user_id, text=f"⚠️ Ocorreu um erro: {e}")
 
+# --- PARSER ---
 def parse_quantum_signal(text):
     try:
         ativo = re.search(r"Ativo: ([\w-]+)", text).group(1).strip()
@@ -57,6 +75,7 @@ def parse_quantum_signal(text):
     except:
         return None
 
+# --- HANDLERS DO BOT ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cursor.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
@@ -64,7 +83,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = [[InlineKeyboardButton("Configurar", callback_data="config")],
           [InlineKeyboardButton("Real", callback_data="mode_REAL"), InlineKeyboardButton("Demo", callback_data="mode_PRACTICE")],
           [InlineKeyboardButton("LIGAR", callback_data="on"), InlineKeyboardButton("DESLIGAR", callback_data="off")]]
-    await update.message.reply_text("🤖 Painel Quantum IA", reply_markup=InlineKeyboardMarkup(kb))
+    await update.message.reply_text("🤖 **Painel Quantum IA**\nConfigure sua conta abaixo:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -76,9 +95,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         m = query.data.split("_")[1]
         cursor.execute("UPDATE users SET account_type = ? WHERE user_id = ?", (m, uid))
     elif query.data == "config":
-        await query.message.reply_text("Envie: email;senha;valor")
+        await query.message.reply_text("Envie seus dados: email;senha;valor")
     conn.commit()
-    await query.edit_message_text("✅ Atualizado!")
+    await query.edit_message_text("✅ Configurações atualizadas!")
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -87,42 +106,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             p = update.message.text.split(";")
             cursor.execute("UPDATE users SET email=?, password=?, value=? WHERE user_id=?", (p[0], p[1], float(p[2]), uid))
             conn.commit()
-            await update.message.reply_text("✅ Salvo!")
-        except: await update.message.reply_text("❌ Erro")
+            await update.message.reply_text("✅ Dados salvos com sucesso!")
+        except: await update.message.reply_text("❌ Formato inválido.")
 
-async def run_bot():
+# --- MAIN ---
+async def main():
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    # O bloco 'async with' inicializa a aplicação automaticamente
     async with application:
         await application.start()
         await application.updater.start_polling()
-        while True:
-            await asyncio.sleep(3600)
+        
+        tg_client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+        await tg_client.start()
+        logging.info("Monitor de Sinais ONLINE!")
 
-async def main():
-    tg_client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
-    await tg_client.start()
-    logging.info("Monitor Telethon Online!")
+        @tg_client.on(events.NewMessage(chats=CHANNEL_ID))
+        async def msg_handler(event):
+            s = parse_quantum_signal(event.raw_text)
+            if s:
+                cursor.execute("SELECT user_id, email, password, value, account_type FROM users WHERE active = 1")
+                for u in cursor.fetchall():
+                    # Passamos o bot para enviar mensagens
+                    asyncio.create_task(execute_trade_with_alerts(application.bot, u[0], u[1], u[2], s, u[3], u[4]))
 
-    @tg_client.on(events.NewMessage(chats=CHANNEL_ID))
-    async def msg_handler(event):
-        s = parse_quantum_signal(event.raw_text)
-        if s:
-            cursor.execute("SELECT email, password, value, account_type FROM users WHERE active = 1")
-            for u in cursor.fetchall():
-                asyncio.create_task(execute_trade_with_gale(u[0], u[1], s, u[2], u[3]))
-
-    await asyncio.gather(
-        run_bot(),
-        tg_client.run_until_disconnected()
-    )
+        await tg_client.run_until_disconnected()
 
 if __name__ == '__main__':
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass
+    asyncio.run(main())
