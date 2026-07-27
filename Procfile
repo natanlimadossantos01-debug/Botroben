@@ -1,1 +1,9 @@
-worker: python main.py
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python bot.py",
+    "healthcheckPath": "/health"
+  }
+}
