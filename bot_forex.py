@@ -25,34 +25,6 @@ CONFIANCA_MINIMA = 65
 ATR_MIN = 0.0003
 ATR_MAX = 0.0015
 
-# Horário de negociação (evitar madrugada e fim de semana)
-def horario_ok():
-    agora = datetime.now(FUSO_BR)
-    if agora.weekday() >= 5:  # sábado e domingo
-        return False
-    hora = agora.hour
-    if hora < 6 or hora > 18:
-        return False
-    return True
-
-# Filtro de notícias de 3 touros (apenas eventos de ALTA importância)
-def noticias_3_touros():
-    """
-    Retorna True se houver alguma notícia de 3 touros nos próximos 30 minutos.
-    Exemplo simplificado: você pode integrar com uma API de notícias (ForexFactory).
-    Aqui usamos uma lista estática de horários de alto impacto (Brasil).
-    """
-    agora = datetime.now(FUSO_BR)
-    hora_minuto = agora.strftime('%H:%M')
-    # Eventos de 3 touros (ajuste conforme sua fonte)
-    eventos_3_touros = [
-        "09:30", "11:00", "15:00", "15:30", "17:00"
-    ]
-    for evento in eventos_3_touros:
-        if hora_minuto == evento:
-            return True
-    return False
-
 def banner():
     print("⚛️ QUANTUM IA M5 - Forex Real | Filtro de Notícias 3 Touros")
 
@@ -171,6 +143,7 @@ class Tsunami:
             return None, 0
         except: return None, 0
 
+# Bot
 class BotM5Forex:
     def __init__(self):
         self.tg = Telegram(TOKEN, CHAT)
