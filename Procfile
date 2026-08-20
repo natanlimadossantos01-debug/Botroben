@@ -1,9 +1,1 @@
-{
-  "build": {
-    "builder": "NIXPACKS"
-  },
-  "deploy": {
-    "startCommand": "python bot.py",
-    "healthcheckPath": "/health"
-  }
-}
+worker: python bot_forex.py
