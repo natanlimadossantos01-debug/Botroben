@@ -1,4 +1,4 @@
 numpy
 requests
-iqoptionapi
+https://github.com/iqoptionapi/iqoptionapi/archive/refs/heads/master.zip
 pandas
