@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 """
-⚛️ QUANTUM IA M5 - FOREX REAL (MERCADO ABERTO)
-📊 Estratégias: Formiga, Fortaleza, Raio Negro, Tsunami
-🎯 Confluência de 2+ estratégias + tendência SMA20 + pavio 50%
-📰 Filtro de notícias de 3 touros (apenas eventos de alta importância)
-📊 Filtro de volatilidade (ATR) calibrado para Forex real
-🔄 Placar diário automático
+⚛️ QUANTUM IA M15 - SEM GALE
+📊 Estratégia: Tendência Forte + Pullback + Confirmação
+🎯 Timeframe: M15 (15 minutos)
+🛡️ Sem martingale (entrada única)
+📡 Yahoo Finance (Forex) ou IQ Option (OTC)
+✅ Correção: close vs open
 """
 import asyncio, time, requests, numpy as np, signal, sys, json, os
 from datetime import datetime, timedelta, timezone
-from collections import deque, defaultdict
+from collections import deque
 from pathlib import Path
+import yfinance as yf
 
 signal.signal(signal.SIGCHLD, signal.SIG_IGN)
 FUSO_BR = timezone(timedelta(hours=-3))
 
 # Configurações
-INTERVALO_MINIMO = 600       # 10 min entre sinais
-USAR_GALE = True
-ANTECEDENCIA = 30            # segundos antes da entrada
-CONFIANCA_MINIMA = 65
+INTERVALO_MINIMO = 900       # 15 min entre sinais
+USAR_GALE = False            # SEM GALE
+ANTECEDENCIA = 30
+CONFIANCA_MINIMA = 70        # Alta confiança (sem gale)
 
-# Volatilidade ATR (valores típicos Forex real)
-ATR_MIN = 0.0003
-ATR_MAX = 0.0015
+# Volatilidade
+ATR_MIN = 0.0001
+ATR_MAX = 0.0030
 
 def banner():
-    print("⚛️ QUANTUM IA M5 - Forex Real | Filtro de Notícias 3 Touros")
+    print("⚛️ QUANTUM IA M15 - Sem Gale")
 
 def carregar_config():
     token = os.environ.get('TELEGRAM_TOKEN')
@@ -41,11 +42,12 @@ def carregar_config():
 cfg = carregar_config()
 TOKEN, CHAT = cfg['token'], cfg['chat']
 
-# Pares Forex reais (sem -OTC)
+# Pares (Yahoo Finance - Forex real)
 ATIVOS = {
-    "EURUSD": "EURUSD",
-    "GBPUSD": "GBPUSD",
-    "USDJPY": "USDJPY"
+    "EURUSD": "EURUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDJPY": "USDJPY=X",
+    "AUDUSD": "AUDUSD=X",
 }
 
 class Telegram:
@@ -56,169 +58,151 @@ class Telegram:
         try: requests.post(f"{self.url}/sendMessage", json={"chat_id": self.c, "text": txt, "parse_mode": "Markdown"}, timeout=10)
         except: pass
 
-# Estratégias
-class Formiga:
-    def ema(self, p, pe):
-        if len(p) < pe: return sum(p)/len(p) if p else 0
-        return np.mean(p[-pe:])
-    def analisar(self, v):
-        try:
-            if len(v) < 15: return None, 0
-            precos = np.array([x['close'] for x in v])
-            ema5 = self.ema(precos, 5); ema10 = self.ema(precos, 10)
-            dif = ((ema5-ema10)/ema10)*100 if ema10 > 0 else 0
-            sc, sp = 0, 0
-            if dif > 0.02: sc += 3
-            elif dif > 0.005: sc += 1
-            elif dif < -0.02: sp += 3
-            elif dif < -0.005: sp += 1
-            if sc >= 2 and sc > sp: return 'CALL', min(50+sc*4, 85)
-            if sp >= 2 and sp > sc: return 'PUT', min(50+sp*4, 85)
-            return None, 0
-        except: return None, 0
+class EstrategiaM15SemGale:
+    """
+    Estratégia M15 sem gale:
+    - Tendência forte (EMA 21 e EMA 50)
+    - Pullback na EMA 21
+    - Confirmação com vela de rejeição
+    - RSI entre 40-60 (não sobrecomprado/sobrevendido)
+    """
+    
+    def __init__(self):
+        self.ema_rapida = 21
+        self.ema_lenta = 50
+        self.rsi_periodo = 14
+    
+    def _ema(self, dados, periodo):
+        if len(dados) < periodo:
+            return np.mean(dados) if len(dados) > 0 else 0
+        alpha = 2 / (periodo + 1)
+        ema = dados[0]
+        for i in range(1, len(dados)):
+            ema = alpha * dados[i] + (1 - alpha) * ema
+        return ema
+    
+    def _rsi(self, precos, periodo=14):
+        if len(precos) < periodo + 1:
+            return 50
+        deltas = np.diff(precos[-periodo-1:])
+        ganhos = np.where(deltas > 0, deltas, 0)
+        perdas = np.where(deltas < 0, -deltas, 0)
+        media_ganho = np.mean(ganhos)
+        media_perda = np.mean(perdas)
+        if media_perda == 0:
+            return 100
+        rs = media_ganho / media_perda
+        return 100 - (100 / (1 + rs))
+    
+    def analisar(self, velas):
+        if len(velas) < 55:
+            return None, 0, {}
+        
+        precos = [v['close'] for v in velas]
+        
+        ema21 = self._ema(precos, 21)
+        ema50 = self._ema(precos, 50)
+        rsi = self._rsi(precos, 14)
+        
+        atual = precos[-1]
+        vela = velas[-1]
+        corpo = abs(vela['close'] - vela['open'])
+        
+        if corpo == 0:
+            return None, 0, {}
+        
+        pavio_sup = vela['high'] - max(vela['close'], vela['open'])
+        pavio_inf = min(vela['close'], vela['open']) - vela['low']
+        
+        detalhes = {}
+        score_call = 0
+        score_put = 0
+        
+        # CALL: Tendência alta forte
+        if ema21 > ema50 and atual > ema21:
+            score_call += 30
+            detalhes['tendencia'] = 'ALTA FORTE'
+            
+            # Pullback próximo da EMA21
+            distancia_ema = abs(atual - ema21) / ema21
+            if distancia_ema <= 0.001:
+                score_call += 20
+                detalhes['pullback'] = 'PRÓXIMO EMA21'
+            
+            # Vela de rejeição (pavio inferior)
+            if pavio_inf >= corpo * 1.2:
+                score_call += 25
+                detalhes['rejeicao'] = 'PAVIO INFERIOR'
+            
+            # RSI favorável
+            if 40 <= rsi <= 65:
+                score_call += 15
+                detalhes['rsi'] = f'FAVORÁVEL ({rsi:.1f})'
+        
+        # PUT: Tendência baixa forte
+        if ema21 < ema50 and atual < ema21:
+            score_put += 30
+            detalhes['tendencia'] = 'BAIXA FORTE'
+            
+            # Pullback próximo da EMA21
+            distancia_ema = abs(atual - ema21) / ema21
+            if distancia_ema <= 0.001:
+                score_put += 20
+                detalhes['pullback'] = 'PRÓXIMO EMA21'
+            
+            # Vela de rejeição (pavio superior)
+            if pavio_sup >= corpo * 1.2:
+                score_put += 25
+                detalhes['rejeicao'] = 'PAVIO SUPERIOR'
+            
+            # RSI favorável
+            if 35 <= rsi <= 60:
+                score_put += 15
+                detalhes['rsi'] = f'FAVORÁVEL ({rsi:.1f})'
+        
+        if score_call > score_put and score_call >= CONFIANCA_MINIMA:
+            return 'CALL', score_call, detalhes
+        elif score_put > score_call and score_put >= CONFIANCA_MINIMA:
+            return 'PUT', score_put, detalhes
+        
+        return None, 0, detalhes
 
-class Fortaleza:
-    def rsi(self, p, pe=7):
-        if len(p) < pe+1: return 50
-        d = np.diff(list(p[-pe-1:]))
-        g = np.where(d > 0, d, 0); l = np.where(d < 0, -d, 0)
-        mg = np.mean(g) if len(g) > 0 else 0
-        mp = np.mean(l) if len(l) > 0 else 0
-        if mp == 0: return 100
-        return 100 - (100/(1+mg/mp))
-    def analisar(self, v):
-        try:
-            if len(v) < 18: return None, 0
-            precos = np.array([x['close'] for x in v])
-            rsi_val = self.rsi(precos)
-            m = np.mean(precos[-10:])
-            s = np.std(precos[-10:])
-            bs = m + 2*s; bi = m - 2*s
-            sc, sp = 0, 0
-            if rsi_val < 30: sc += 3
-            elif rsi_val < 40: sc += 2
-            if rsi_val > 70: sp += 3
-            elif rsi_val > 60: sp += 2
-            if precos[-1] <= bi*1.0004: sc += 3
-            if precos[-1] >= bs*0.9996: sp += 3
-            if sc >= 4 and sc > sp: return 'CALL', min(60+sc*3, 90)
-            if sp >= 4 and sp > sc: return 'PUT', min(60+sp*3, 90)
-            return None, 0
-        except: return None, 0
-
-class RaioNegro:
-    def analisar(self, v):
-        try:
-            if len(v) < 12: return None, 0
-            precos = np.array([x['close'] for x in v])
-            ema5 = np.mean(precos[-5:]); ema13 = np.mean(precos[-13:])
-            macd = ema5 - ema13
-            sinal = macd * 0.5
-            mom = precos[-1] - precos[-3]
-            sc, sp = 0, 0
-            if macd > sinal and macd > 0: sc += 3
-            elif macd > sinal: sc += 1
-            elif macd < sinal and macd < 0: sp += 3
-            elif macd < sinal: sp += 1
-            if mom > 0.00003: sc += 3
-            elif mom > 0: sc += 1
-            elif mom < -0.00003: sp += 3
-            elif mom < 0: sp += 1
-            if sc >= 2 and sc > sp: return 'CALL', min(48+sc*4, 85)
-            if sp >= 2 and sp > sc: return 'PUT', min(48+sp*4, 85)
-            return None, 0
-        except: return None, 0
-
-class Tsunami:
-    def analisar(self, v):
-        try:
-            if len(v) < 12: return None, 0
-            precos = [x['close'] for x in v]
-            altas = sum(1 for i in range(-min(5,len(v)-1), 0) if precos[i] > precos[i-1])
-            sc, sp = 0, 0
-            if altas >= 3: sc += 3
-            elif altas <= 2: sp += 3
-            if sc >= 2 and sc > sp: return 'CALL', min(50+sc*3, 85)
-            if sp >= 2 and sp > sc: return 'PUT', min(50+sp*3, 85)
-            return None, 0
-        except: return None, 0
-
-# Bot
-class BotM5Forex:
+class BotM15:
     def __init__(self):
         self.tg = Telegram(TOKEN, CHAT)
         self.velas = {nome: deque(maxlen=100) for nome in ATIVOS}
-        self.estrategias = [
-            ('🐜 Formiga', Formiga()),
-            ('🏰 Fortaleza', Fortaleza()),
-            ('⚡ Raio Negro', RaioNegro()),
-            ('🌊 Tsunami', Tsunami())
-        ]
-        self.iq_api = None
-        self.placar = {'w': 0, 'g1': 0, 'l': 0}
+        self.estrategia = EstrategiaM15SemGale()
+        self.placar = {'w': 0, 'l': 0}  # Sem gale
         self.ult_sinal = 0
+        self.sinais = 0
         self.ultimo_dia = datetime.now(FUSO_BR).day
-
-    def conectar_iq(self):
-        from iqoptionapi.stable_api import IQ_Option
-        email = os.environ.get('IQ_EMAIL')
-        senha = os.environ.get('IQ_SENHA')
-        if not email or not senha:
-            return None
-        try:
-            if self.iq_api:
-                try: self.iq_api.close()
-                except: pass
-            self.iq_api = IQ_Option(email, senha)
-            check, _ = self.iq_api.connect()
-            if check:
-                print("✅ Conectado à IQ Option.")
-                return self.iq_api
-            else:
-                print("❌ Falha na conexão.")
-                return None
-        except Exception as e:
-            print(f"❌ Erro: {e}")
-            return None
-
-    async def reconectar_se_necessario(self):
-        if self.iq_api is None or not self.iq_api.check_connect():
-            print("🔄 Reconectando...")
-            return self.conectar_iq()
-        return self.iq_api
-
-    async def atualizar_velas(self):
-        api = await self.reconectar_se_necessario()
-        if not api:
-            return
-        for nome, ativo_id in ATIVOS.items():
-            for retry in range(3):
-                try:
-                    if not api.check_connect():
-                        api = await self.reconectar_se_necessario()
-                        if not api:
-                            break
-                    c = api.get_candles(ativo_id, 300, 80, time.time())  # M5
-                    if c and len(c) > 0:
-                        self.velas[nome].clear()
-                        for x in c[-80:]:
-                            if isinstance(x, dict):
-                                self.velas[nome].append({
-                                    'time': datetime.fromtimestamp(x.get('from',0), FUSO_BR),
-                                    'open': float(x['open']), 'high': float(x['max']),
-                                    'low': float(x['min']), 'close': float(x['close']),
-                                    'volume': int(x.get('volume',0))
-                                })
-                        break
-                    time.sleep(2)
-                except Exception as e:
-                    print(f"Erro velas {nome}: {e}")
-                    time.sleep(2)
-                    if "need reconnect" in str(e):
-                        api = await self.reconectar_se_necessario()
-                        if not api:
-                            break
-
+    
+    def atualizar_velas(self):
+        """Busca velas M15 do Yahoo Finance"""
+        for nome, symbol in ATIVOS.items():
+            try:
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(period="1d", interval="15m")
+                
+                if df is not None and len(df) > 0:
+                    self.velas[nome].clear()
+                    for index, row in df.iterrows():
+                        self.velas[nome].append({
+                            'time': index.to_pydatetime().astimezone(FUSO_BR),
+                            'open': float(row['Open']),
+                            'high': float(row['High']),
+                            'low': float(row['Low']),
+                            'close': float(row['Close']),
+                            'volume': int(row['Volume']) if 'Volume' in row else 0
+                        })
+                    print(f"✅ {nome}: {len(self.velas[nome])} velas")
+                else:
+                    print(f"⚠️ {nome}: sem dados")
+            except Exception as e:
+                print(f"❌ {nome}: {e}")
+        
+        print()
+    
     def calcular_atr(self, velas, periodo=14):
         if len(velas) < periodo + 1:
             return None
@@ -226,165 +210,152 @@ class BotM5Forex:
         for i in range(-periodo, 0):
             h = velas[i]['high']
             l = velas[i]['low']
-            c_prev = velas[i-1]['close']
+            c_prev = velas[i-1]['close'] if i > -periodo else velas[i]['open']
             tr = max(h - l, abs(h - c_prev), abs(l - c_prev))
             trs.append(tr)
         return np.mean(trs)
-
-    def buscar_sinal_consenso(self):
-        if not horario_ok() or noticias_3_touros():
-            return None
-
+    
+    def buscar_sinal(self):
+        melhor_sinal = None
+        melhor_score = 0
+        
         for par, velas in self.velas.items():
-            if len(velas) < 30:
+            if len(velas) < 55:
                 continue
+            
             atr = self.calcular_atr(velas, 14)
             if atr is None or atr < ATR_MIN or atr > ATR_MAX:
                 continue
-            precos = [v['close'] for v in velas]
-            sma20 = sum(precos[-20:]) / 20
-            atual = precos[-1]
-
-            votos_call = []
-            votos_put = []
-            for nome_est, est in self.estrategias:
-                resultado = est.analisar(velas)
-                if resultado:
-                    direcao, conf = resultado
-                    if conf >= CONFIANCA_MINIMA:
-                        if direcao == 'CALL':
-                            votos_call.append(conf)
-                        else:
-                            votos_put.append(conf)
-
-            if len(votos_call) >= 2 and atual > sma20:
-                conf_media = sum(votos_call) / len(votos_call)
-                vela = velas[-1]
-                corpo = abs(vela['close'] - vela['open'])
-                if corpo > 0:
-                    pavio_sup = vela['high'] - max(vela['close'], vela['open'])
-                    if pavio_sup > corpo * 0.5:
-                        continue
-                return {'ativo': par, 'direcao': 'CALL', 'confianca': conf_media}
-
-            if len(votos_put) >= 2 and atual < sma20:
-                conf_media = sum(votos_put) / len(votos_put)
-                vela = velas[-1]
-                corpo = abs(vela['close'] - vela['open'])
-                if corpo > 0:
-                    pavio_inf = min(vela['close'], vela['open']) - vela['low']
-                    if pavio_inf > corpo * 0.5:
-                        continue
-                return {'ativo': par, 'direcao': 'PUT', 'confianca': conf_media}
-        return None
-
+            
+            direcao, confianca, detalhes = self.estrategia.analisar(velas)
+            if direcao and confianca >= CONFIANCA_MINIMA:
+                if confianca > melhor_score:
+                    melhor_score = confianca
+                    melhor_sinal = {
+                        'ativo': par,
+                        'direcao': direcao,
+                        'confianca': confianca,
+                        'detalhes': detalhes
+                    }
+        
+        return melhor_sinal
+    
     def calcular_horario_entrada(self):
         agora = datetime.now(FUSO_BR)
         minuto = agora.minute
-        resto = minuto % 5
+        resto = minuto % 15
         if resto == 0 and agora.second == 0:
             return agora.replace(second=0, microsecond=0)
         else:
-            return agora.replace(second=0, microsecond=0) + timedelta(minutes=5 - resto)
-
+            return agora.replace(second=0, microsecond=0) + timedelta(minutes=15 - resto)
+    
     def formatar_sinal(self, sinal, horario):
         ativo = sinal['ativo']
         direcao = sinal['direcao']
+        conf = sinal['confianca']
+        detalhes = sinal.get('detalhes', {})
         hora = horario.strftime('%H:%M')
-        return f"""🚨SINAL AO VIVO🚨
+        detalhes_txt = "\n".join([f"• {k}: {v}" for k, v in detalhes.items()])
+        
+        return f"""🚨SINAL M15 SEM GALE🚨
 
-✳️ QUANTUM IA M5 ✅
-⏲ EXPIRAÇÃO: M5
+⚛️ QUANTUM IA M15
+⏲ EXPIRAÇÃO: 15 MINUTOS
 
 👉🏼 HORARIO: {hora}
 
-🏳ATIVO: {ativo} {direcao}
+🏳 ATIVO: {ativo} {'🟢' if direcao == 'CALL' else '🔴'}
+📊 DIREÇÃO: {direcao}
+🎯 CONFIANÇA: {conf:.0f}%
 
-🍀🍀BOA SORTE 🍀 🍀"""
+📈 ANÁLISE:
+{detalhes_txt}
 
+🛡️ SEM GALE - ENTRADA ÚNICA
+
+🍀🍀 BOA SORTE 🍀🍀"""
+    
     async def monitorar_resultado(self, sinal, horario_entrada):
         ativo = sinal['ativo']
         direcao = sinal['direcao']
-
+        
         agora = datetime.now(FUSO_BR)
-        espera = (horario_entrada + timedelta(minutes=5) - agora).total_seconds()
+        espera = (horario_entrada + timedelta(minutes=15) - agora).total_seconds()
         if espera > 0:
             await asyncio.sleep(espera)
-        await asyncio.sleep(10)
-        await self.atualizar_velas()
+        await asyncio.sleep(30)
+        self.atualizar_velas()
         velas = self.velas[ativo]
-
+        
         ganhou = False
         for v in velas:
             if v['time'].replace(second=0, microsecond=0) == horario_entrada.replace(second=0, microsecond=0):
-                ganhou = v['close'] > v['open'] if direcao == 'CALL' else v['close'] < v['open']
+                if direcao == 'CALL':
+                    ganhou = v['close'] > v['open']
+                else:
+                    ganhou = v['close'] < v['open']
                 break
-
+        
         if ganhou:
             self.placar['w'] += 1
             resultado = "✅ WIN"
         else:
-            if USAR_GALE:
-                proxima_vela = horario_entrada + timedelta(minutes=5)
-                agora = datetime.now(FUSO_BR)
-                espera = (proxima_vela + timedelta(minutes=5) - agora).total_seconds()
-                if espera > 0:
-                    await asyncio.sleep(espera)
-                await asyncio.sleep(10)
-                await self.atualizar_velas()
-                velas = self.velas[ativo]
-                ganhou_gale = False
-                for v in velas:
-                    if v['time'].replace(second=0, microsecond=0) == proxima_vela.replace(second=0, microsecond=0):
-                        ganhou_gale = v['close'] > v['open'] if direcao == 'CALL' else v['close'] < v['open']
-                        break
-                if ganhou_gale:
-                    self.placar['g1'] += 1
-                    resultado = "✅ WIN GALE 1"
-                else:
-                    self.placar['l'] += 1
-                    resultado = "❌ LOSS"
-            else:
-                self.placar['l'] += 1
-                resultado = "❌ LOSS"
-
-        total = self.placar['w'] + self.placar['g1'] + self.placar['l']
-        tx = round(((self.placar['w'] + self.placar['g1']) / total) * 100, 1) if total > 0 else 0.0
+            self.placar['l'] += 1
+            resultado = "❌ LOSS"
+        
+        total = self.placar['w'] + self.placar['l']
+        tx = round((self.placar['w'] / total) * 100, 1) if total > 0 else 0.0
         msg = f"""{resultado}
 📊 {ativo} | {direcao} {'🟢' if direcao=='CALL' else '🔴'}
-📊 Placar: 🟢{self.placar['w']}W 🟡{self.placar['g1']}G1 🔴{self.placar['l']}L
+📊 Placar: 🟢{self.placar['w']}W 🔴{self.placar['l']}L
 🎯 Assertividade: {tx}%"""
         self.tg.send(msg)
-
+    
     def verificar_zeramento_diario(self):
         agora = datetime.now(FUSO_BR)
         if agora.day != self.ultimo_dia:
             self.ultimo_dia = agora.day
-            self.placar = {'w': 0, 'g1': 0, 'l': 0}
-            self.tg.send("🔄 *PLACAR ZERADO AUTOMATICAMENTE PARA O NOVO DIA*")
-            print("🔄 Placar zerado para o novo dia.")
-
+            self.placar = {'w': 0, 'l': 0}
+            self.tg.send("🔄 *PLACAR ZERADO*")
+            print("🔄 Placar zerado.")
+    
     async def executar(self):
         banner()
-        print("⚛️ Bot Forex Real M5 iniciando...")
-        self.tg.send("🔥 *QUANTUM IA M5 FOREX ATIVADO*\n📊 Estratégias: Formiga, Fortaleza, Raio Negro, Tsunami\n📰 Filtro de notícias 3 touros\n🛡️ Volatilidade e horário\n🔄 Placar diário automático")
+        print("⚛️ Bot M15 sem gale iniciando...")
+        self.tg.send(f"""🔥 *QUANTUM IA M15 SEM GALE*
+
+📊 Estratégia: Tendência + Pullback + Confirmação
+🎯 Confiança mínima: {CONFIANCA_MINIMA}%
+⏱️ Timeframe: M15
+🛡️ SEM GALE - Entrada única
+📡 Yahoo Finance""")
+        
         while True:
             try:
                 self.verificar_zeramento_diario()
-                await self.atualizar_velas()
-                sinal = self.buscar_sinal_consenso()
-                if sinal and time.time() - self.ult_sinal > INTERVALO_MINIMO:
-                    horario_entrada = self.calcular_horario_entrada()
-                    horario_envio = horario_entrada - timedelta(seconds=ANTECEDENCIA)
-                    agora = datetime.now(FUSO_BR)
-                    espera = (horario_envio - agora).total_seconds()
-                    if espera > 0:
-                        await asyncio.sleep(espera)
-                    self.ult_sinal = time.time()
-                    msg = self.formatar_sinal(sinal, horario_entrada)
-                    self.tg.send(msg)
-                    asyncio.create_task(self.monitorar_resultado(sinal, horario_entrada))
+                self.atualizar_velas()
+                
+                horario_entrada = self.calcular_horario_entrada()
+                horario_envio = horario_entrada - timedelta(seconds=ANTECEDENCIA)
+                
+                agora = datetime.now(FUSO_BR)
+                tempo_ate_envio = (horario_envio - agora).total_seconds()
+                
+                if 0 <= tempo_ate_envio <= 35:
+                    sinal = self.buscar_sinal()
+                    
+                    if sinal and time.time() - self.ult_sinal > INTERVALO_MINIMO:
+                        if tempo_ate_envio > 0:
+                            await asyncio.sleep(tempo_ate_envio)
+                        
+                        self.ult_sinal = time.time()
+                        self.sinais += 1
+                        msg = self.formatar_sinal(sinal, horario_entrada)
+                        self.tg.send(msg)
+                        asyncio.create_task(self.monitorar_resultado(sinal, horario_entrada))
+                
                 await asyncio.sleep(1)
+                
             except KeyboardInterrupt:
                 print("🛑 Encerrado.")
                 break
@@ -393,5 +364,4 @@ class BotM5Forex:
                 await asyncio.sleep(10)
 
 if __name__ == "__main__":
-    bot = BotM5Forex()
-    asyncio.run(bot.executar())
+    asyncio.run(BotM15().executar())
